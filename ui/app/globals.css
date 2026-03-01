@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255, 255, 255, 0.06), transparent 42%),
+    radial-gradient(circle at 88% 100%, rgba(255, 170, 66, 0.08), transparent 40%),
+    #010101;
+  color: #c9d7e8;
+}
+
+body {
+  font-family: var(--font-share-tech-mono), monospace;
+  letter-spacing: 0.01em;
+}
+
+.numeric {
+  font-family: var(--font-ibm-plex-mono), monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.grid-panel {
+  @apply rounded-lg border border-terminal-border bg-terminal-panel shadow-panel;
+}

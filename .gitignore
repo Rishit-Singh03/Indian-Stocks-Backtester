@@ -10,3 +10,8 @@ wheels/
 .venv
 
 .env
+
+*.txt
+
+ui/node_modules/
+ui/.next/

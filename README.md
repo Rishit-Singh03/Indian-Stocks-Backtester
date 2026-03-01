@@ -55,6 +55,23 @@ Useful endpoints:
 uv sync
 ```
 
+## 2.1) Start Backend API (FastAPI)
+```bash
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Open docs:
+- `http://localhost:8000/docs`
+
+Implemented endpoints:
+- `GET /api/v1/health`
+- `GET /api/v1/search?q=...`
+- `GET /api/v1/indexes/snapshot?on_date=YYYY-MM-DD`
+- `GET /api/v1/series?symbols=...&universe=stock|index&interval=1d|1w`
+- `GET /api/v1/ohlcv/{symbol}?universe=stock|index&interval=1d|1w`
+- `GET /api/v1/compare?symbols=...&universe=stock|index&interval=1d|1w&normalized_base=100`
+- `GET /api/v1/correlation?symbols=...&universe=stock|index&interval=1d|1w&window=52`
+
 ## 3) Create `TickerMaster` Table (one-time)
 Run this once before symbol ingestion:
 
