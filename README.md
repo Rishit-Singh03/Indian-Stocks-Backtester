@@ -143,6 +143,12 @@ Weekly repair (Sunday 8:00 PM, replay last 7 days):
 schtasks /Create /TN "BSE-Weekly-Repair" /SC WEEKLY /D SUN /ST 20:00 /F /TR "cmd /c cd /d C:\Users\rishs\OneDrive\Desktop\Stock && uv run python scripts\update_bse_prices_daily.py --limit 0 --replay-days 7"
 ```
 
+Daily index updater (example 7:45 PM):
+
+```powershell
+schtasks /Create /TN "INDEX-Daily-Update" /SC DAILY /ST 19:45 /F /TR "cmd /c cd /d C:\Users\rishs\OneDrive\Desktop\Stock && uv run python scripts\update_index_data_daily.py"
+```
+
 ## 8) Backfill Index Data (NIFTY, SENSEX, Others)
 Script: `scripts/backfill_index_data.py`
 
@@ -165,6 +171,19 @@ uv run python scripts/backfill_index_data.py --index-map-json "{\"NIFTY_50\":\"^
 ```
 
 Creates table: `market.IndexDaily`
+
+## 9) Incremental Daily Index Updater
+Script: `scripts/update_index_data_daily.py`
+
+```bash
+uv run python scripts/update_index_data_daily.py --verbose
+```
+
+Behavior:
+- Resumes each index from its own `max(date)` in `market.IndexDaily`
+- Default start is `max(date) + 1`
+- Automatically catches up missed days if machine was down
+- Optional repair mode: `--replay-days 7`
 
 ## Validation Queries
 Check symbol master:
