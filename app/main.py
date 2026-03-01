@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from math import sqrt
+import re
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -159,9 +160,13 @@ def search(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=10
     db = validate_identifier(settings.clickhouse_database)
     ticker_tbl = table_name("ticker")
     index_tbl = table_name("index")
-    q_sql = sql_string(f"%{q}%")
-    stock_limit = max(1, int(limit * 0.7))
-    index_limit = max(1, limit - stock_limit)
+    query_raw = q.strip()
+    if not query_raw:
+        return {"query": q, "count": 0, "results": []}
+    q_sql = sql_string(query_raw)
+    q_norm = re.sub(r"[^A-Za-z0-9]", "", query_raw).lower()
+    q_norm_sql = sql_string(q_norm)
+    fetch_cap = max(100, limit * 5)
 
     stock_query = f"""
 SELECT
@@ -173,12 +178,16 @@ FROM {db}.{ticker_tbl}
 WHERE exchange = 'BSE'
   AND status = 'ACTIVE'
   AND (
-      lowerUTF8(symbol) LIKE lowerUTF8({q_sql})
-      OR lowerUTF8(company_name) LIKE lowerUTF8({q_sql})
-      OR lowerUTF8(bse_code) LIKE lowerUTF8({q_sql})
+      positionCaseInsensitiveUTF8(symbol, {q_sql}) > 0
+      OR positionCaseInsensitiveUTF8(company_name, {q_sql}) > 0
+      OR positionCaseInsensitiveUTF8(bse_code, {q_sql}) > 0
+      OR (
+          length({q_norm_sql}) > 0
+          AND positionCaseInsensitiveUTF8(replaceRegexpAll(symbol, '[^A-Za-z0-9]', ''), {q_norm_sql}) > 0
+      )
   )
 ORDER BY symbol
-LIMIT {stock_limit}
+LIMIT {fetch_cap}
 FORMAT JSONEachRow
 """.strip()
     index_query = f"""
@@ -189,9 +198,15 @@ SELECT
     any(provider_ticker) AS meta
 FROM {db}.{index_tbl}
 GROUP BY index_name
-HAVING lowerUTF8(index_name) LIKE lowerUTF8({q_sql})
+HAVING
+    positionCaseInsensitiveUTF8(index_name, {q_sql}) > 0
+    OR positionCaseInsensitiveUTF8(any(provider_ticker), {q_sql}) > 0
+    OR (
+        length({q_norm_sql}) > 0
+        AND positionCaseInsensitiveUTF8(replaceRegexpAll(index_name, '[^A-Za-z0-9]', ''), {q_norm_sql}) > 0
+    )
 ORDER BY index_name
-LIMIT {index_limit}
+LIMIT {fetch_cap}
 FORMAT JSONEachRow
 """.strip()
 
@@ -201,8 +216,57 @@ FORMAT JSONEachRow
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    combined = (stock_rows + index_rows)[:limit]
-    return {"query": q, "count": len(combined), "results": combined}
+    query_lower = query_raw.lower()
+
+    def norm(value: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", value.lower())
+
+    def score_row(row: dict[str, Any]) -> int:
+        code = str(row.get("code", ""))
+        name = str(row.get("name", ""))
+        code_lower = code.lower()
+        name_lower = name.lower()
+        code_norm = norm(code)
+        name_norm = norm(name)
+
+        score = 0
+        if code_lower == query_lower:
+            score += 120
+        elif code_norm and code_norm == q_norm:
+            score += 110
+        elif code_lower.startswith(query_lower):
+            score += 90
+        elif code_norm and q_norm and code_norm.startswith(q_norm):
+            score += 80
+        elif query_lower in code_lower:
+            score += 70
+        elif q_norm and q_norm in code_norm:
+            score += 65
+
+        if name_lower.startswith(query_lower):
+            score += 45
+        elif query_lower in name_lower:
+            score += 35
+        elif q_norm and q_norm in name_norm:
+            score += 30
+
+        # Keep indexes competitive for index-like queries (e.g. NIFTY_50 / SENSEX).
+        if row.get("type") == "index" and any(k in query_lower for k in ("nifty", "sensex", "index")):
+            score += 20
+        return score
+
+    dedup: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in stock_rows + index_rows:
+        key = (str(row.get("type", "")), str(row.get("code", "")))
+        if key not in dedup:
+            dedup[key] = row
+
+    ranked = sorted(
+        dedup.values(),
+        key=lambda row: (-score_row(row), str(row.get("type", "")), str(row.get("code", ""))),
+    )
+    results = ranked[:limit]
+    return {"query": q, "count": len(results), "results": results}
 
 
 @app.get("/api/v1/indexes/snapshot")

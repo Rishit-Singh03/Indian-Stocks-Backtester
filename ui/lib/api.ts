@@ -40,7 +40,7 @@ export type CompareSeriesRow = {
 };
 
 export type CompareResponse = {
-  universe: "stock" | "index";
+  universe: "stock" | "index" | "mixed";
   interval: "1d" | "1w";
   normalized_base: number;
   start_date: string;
@@ -65,7 +65,7 @@ export type CorrelationCell = {
 };
 
 export type CorrelationResponse = {
-  universe: "stock" | "index";
+  universe: "stock" | "index" | "mixed";
   interval: "1d" | "1w";
   window: number;
   start_date: string;
@@ -84,9 +84,9 @@ async function getJson<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function searchSymbols(query: string): Promise<SearchResult[]> {
+export async function searchSymbols(query: string, limit = 50): Promise<SearchResult[]> {
   const encoded = encodeURIComponent(query);
-  const data = await getJson<{ results: SearchResult[] }>(`/api/v1/search?q=${encoded}&limit=20`);
+  const data = await getJson<{ results: SearchResult[] }>(`/api/v1/search?q=${encoded}&limit=${limit}`);
   return data.results ?? [];
 }
 

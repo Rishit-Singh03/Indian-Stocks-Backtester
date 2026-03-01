@@ -9,8 +9,6 @@ import {
   OhlcvResponse,
   SearchResult,
   SeriesPoint,
-  fetchCompare,
-  fetchCorrelation,
   fetchIndexSnapshot,
   fetchOhlcv,
   searchSymbols,
@@ -23,8 +21,44 @@ type LineSeries = {
   points: { date: string; value: number }[];
 };
 
+type Target = {
+  type: "stock" | "index";
+  code: string;
+};
+
 const CHART_COLORS = ["#f5a623", "#5cd1ff", "#7cff9e", "#ff6b6b", "#b18cff", "#ffd166"];
 const NORMALIZED_BASE_OPTIONS = [100, 1000];
+
+function targetKey(target: Target): string {
+  return `${target.type}:${target.code}`;
+}
+
+function targetLabel(target: Target): string {
+  return `${target.type === "index" ? "IDX" : "STK"}:${target.code}`;
+}
+
+function corr(x: number[], y: number[]): number | null {
+  const n = x.length;
+  if (n < 2 || n !== y.length) {
+    return null;
+  }
+  const mx = x.reduce((acc, val) => acc + val, 0) / n;
+  const my = y.reduce((acc, val) => acc + val, 0) / n;
+  let num = 0;
+  let denX = 0;
+  let denY = 0;
+  for (let i = 0; i < n; i += 1) {
+    const dx = x[i] - mx;
+    const dy = y[i] - my;
+    num += dx * dy;
+    denX += dx * dx;
+    denY += dy * dy;
+  }
+  if (denX === 0 || denY === 0) {
+    return null;
+  }
+  return num / Math.sqrt(denX * denY);
+}
 
 function cls(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -94,7 +128,7 @@ function useSearch(query: string): SearchResult[] {
       return;
     }
     const timer = setTimeout(() => {
-      searchSymbols(query)
+      searchSymbols(query, 50)
         .then((rows) => setResults(rows))
         .catch(() => setResults([]));
     }, 160);
@@ -104,27 +138,54 @@ function useSearch(query: string): SearchResult[] {
   return results;
 }
 
-function linePath(values: number[], width: number, height: number): string {
+function linePathAligned(values: Array<number | null>, width: number, height: number, min: number, max: number): string {
   if (values.length === 0) {
     return "";
   }
-  const min = Math.min(...values);
-  const max = Math.max(...values);
   const span = max - min || 1;
-  return values
-    .map((value, idx) => {
-      const x = (idx / Math.max(values.length - 1, 1)) * width;
-      const y = height - ((value - min) / span) * height;
-      return `${idx === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(" ");
+  let path = "";
+  let started = false;
+  values.forEach((value, idx) => {
+    if (value === null || Number.isNaN(value)) {
+      started = false;
+      return;
+    }
+    const x = (idx / Math.max(values.length - 1, 1)) * width;
+    const y = height - ((value - min) / span) * height;
+    if (!started) {
+      path += `M${x.toFixed(2)},${y.toFixed(2)}`;
+      started = true;
+    } else {
+      path += ` L${x.toFixed(2)},${y.toFixed(2)}`;
+    }
+  });
+  return path;
 }
 
-function MiniLineChart({ series }: { series: LineSeries[] }) {
+function MiniLineChart({
+  series,
+  valueFormatter = numberFmt,
+}: {
+  series: LineSeries[];
+  valueFormatter?: (value: number) => string;
+}) {
   const width = 920;
   const height = 280;
-  const allValues = series.flatMap((s) => s.points.map((p) => p.value));
-  if (allValues.length === 0) {
+
+  const aligned = useMemo(() => {
+    const dates = Array.from(new Set(series.flatMap((line) => line.points.map((point) => point.date)))).sort();
+    const lines = series.map((line) => {
+      const lookup = new Map(line.points.map((point) => [point.date, point.value]));
+      const values = dates.map((date) => (lookup.has(date) ? lookup.get(date)! : null));
+      return { ...line, values };
+    });
+    return { dates, lines };
+  }, [series]);
+
+  const allValues = aligned.lines.flatMap((line) => line.values.filter((value): value is number => value !== null));
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  if (allValues.length === 0 || aligned.dates.length === 0) {
     return (
       <div className="grid-panel flex h-[320px] items-center justify-center text-sm text-slate-400">
         No series data for this selection.
@@ -141,12 +202,33 @@ function MiniLineChart({ series }: { series: LineSeries[] }) {
     return { y, val };
   });
 
+  const hoverDate = hoverIndex !== null ? aligned.dates[hoverIndex] : null;
+  const hoverRows =
+    hoverIndex !== null
+      ? aligned.lines
+          .map((line) => ({ name: line.name, color: line.color, value: line.values[hoverIndex] }))
+          .filter((item) => item.value !== null)
+      : [];
+  const hoverX = hoverIndex !== null ? (hoverIndex / Math.max(aligned.dates.length - 1, 1)) * width : null;
+
   return (
-    <div className="grid-panel h-[320px] p-4">
+    <div
+      className="grid-panel h-[320px] p-4"
+      onMouseLeave={() => setHoverIndex(null)}
+      onMouseMove={(event) => {
+        const rect = (event.currentTarget as HTMLDivElement).getBoundingClientRect();
+        const chartLeft = rect.left + 64;
+        const chartWidth = Math.max(rect.width - 96, 1);
+        const rawX = event.clientX - chartLeft;
+        const ratio = Math.max(0, Math.min(1, rawX / chartWidth));
+        const idx = Math.round(ratio * Math.max(aligned.dates.length - 1, 1));
+        setHoverIndex(idx);
+      }}
+    >
       <div className="flex h-full gap-4">
         <div className="numeric flex w-20 flex-col justify-between text-xs text-slate-400">
           {grid.map((tick) => (
-            <span key={tick.y}>{numberFmt(tick.val)}</span>
+            <span key={tick.y}>{valueFormatter(tick.val)}</span>
           ))}
         </div>
         <div className="relative flex-1">
@@ -162,12 +244,8 @@ function MiniLineChart({ series }: { series: LineSeries[] }) {
                 strokeWidth={1}
               />
             ))}
-            {series.map((line) => {
-              const path = linePath(
-                line.points.map((point) => point.value),
-                width,
-                height,
-              );
+            {aligned.lines.map((line) => {
+              const path = linePathAligned(line.values, width, height, min, max);
               return (
                 <path
                   key={line.name}
@@ -180,11 +258,105 @@ function MiniLineChart({ series }: { series: LineSeries[] }) {
                 />
               );
             })}
+            {hoverX !== null ? (
+              <line x1={hoverX} x2={hoverX} y1={0} y2={height} stroke="rgba(140, 220, 255, 0.4)" strokeWidth={1} />
+            ) : null}
+            {hoverIndex !== null
+              ? aligned.lines.map((line) => {
+                  const value = line.values[hoverIndex];
+                  if (value === null) {
+                    return null;
+                  }
+                  const y = height - ((value - min) / span) * height;
+                  const x = (hoverIndex / Math.max(aligned.dates.length - 1, 1)) * width;
+                  return <circle key={`${line.name}-dot`} cx={x} cy={y} r={3.5} fill={line.color} />;
+                })
+              : null}
           </svg>
+          <div className="absolute bottom-2 left-2 flex flex-wrap gap-3 text-xs">
+            {aligned.lines.map((line) => (
+              <div key={line.name} className="numeric flex items-center gap-2 text-slate-300">
+                <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: line.color }} />
+                <span>{line.name}</span>
+              </div>
+            ))}
+          </div>
+          {hoverDate ? (
+            <div className="pointer-events-none absolute right-2 top-2 min-w-[150px] rounded border border-terminal-border bg-black/85 p-2 text-xs">
+              <div className="numeric mb-1 text-slate-300">{hoverDate}</div>
+              <div className="space-y-1">
+                {hoverRows.map((row) => (
+                  <div key={`tip-${row.name}`} className="numeric flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2 text-slate-300">
+                      <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: row.color }} />
+                      {row.name}
+                    </span>
+                    <span className="text-white">{valueFormatter(row.value!)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
   );
+}
+
+function correlationCellColor(value: number | null): string {
+  if (value === null || Number.isNaN(value)) {
+    return "rgba(15, 23, 42, 0.35)";
+  }
+  const clamped = Math.max(-1, Math.min(1, value));
+  if (clamped >= 0) {
+    const alpha = 0.15 + clamped * 0.45;
+    return `rgba(34, 197, 94, ${alpha.toFixed(3)})`;
+  }
+  const alpha = 0.15 + Math.abs(clamped) * 0.45;
+  return `rgba(239, 68, 68, ${alpha.toFixed(3)})`;
+}
+
+function rollingCorrelationSeries(
+  aPoints: SeriesPoint[],
+  bPoints: SeriesPoint[],
+  window: number,
+): { date: string; value: number }[] {
+  if (window < 2) {
+    return [];
+  }
+  const aReturns = new Map<string, number>();
+  const bReturns = new Map<string, number>();
+
+  const aSorted = [...aPoints].sort((x, y) => x.date.localeCompare(y.date));
+  const bSorted = [...bPoints].sort((x, y) => x.date.localeCompare(y.date));
+
+  for (let i = 1; i < aSorted.length; i += 1) {
+    const prev = aSorted[i - 1].close;
+    const curr = aSorted[i].close;
+    if (prev > 0) {
+      aReturns.set(aSorted[i].date, (curr / prev) - 1);
+    }
+  }
+  for (let i = 1; i < bSorted.length; i += 1) {
+    const prev = bSorted[i - 1].close;
+    const curr = bSorted[i].close;
+    if (prev > 0) {
+      bReturns.set(bSorted[i].date, (curr / prev) - 1);
+    }
+  }
+
+  const common = Array.from(aReturns.keys()).filter((date) => bReturns.has(date)).sort();
+  const output: { date: string; value: number }[] = [];
+  for (let i = window - 1; i < common.length; i += 1) {
+    const frame = common.slice(i - window + 1, i + 1);
+    const x = frame.map((date) => aReturns.get(date)!);
+    const y = frame.map((date) => bReturns.get(date)!);
+    const value = corr(x, y);
+    if (value !== null) {
+      output.push({ date: common[i], value });
+    }
+  }
+  return output;
 }
 
 function CorrelationMatrix({
@@ -223,7 +395,11 @@ function CorrelationMatrix({
               {symbols.map((colSymbol) => {
                 const value = lookup.get(`${rowSymbol}::${colSymbol}`) ?? null;
                 return (
-                  <td key={`${rowSymbol}-${colSymbol}`} className="numeric px-2 py-2 text-slate-200">
+                  <td
+                    key={`${rowSymbol}-${colSymbol}`}
+                    className="numeric px-2 py-2 text-slate-100"
+                    style={{ backgroundColor: correlationCellColor(value) }}
+                  >
                     {value === null ? "--" : value.toFixed(3)}
                   </td>
                 );
@@ -360,17 +536,20 @@ export default function DashboardPage() {
   const [interval, setInterval] = useState<"1d" | "1w">("1w");
 
   const [primaryInput, setPrimaryInput] = useState("RELIANCE");
+  const [primaryUniverse, setPrimaryUniverse] = useState<"stock" | "index">("stock");
   const [primarySymbol, setPrimarySymbol] = useState("RELIANCE");
 
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareInput, setCompareInput] = useState("");
-  const [compareSymbols, setCompareSymbols] = useState<string[]>([]);
+  const [compareTargets, setCompareTargets] = useState<Target[]>([]);
   const [normalizedBase, setNormalizedBase] = useState<number>(100);
+  const [rollingWindow, setRollingWindow] = useState<number>(26);
 
   const [indexRows, setIndexRows] = useState<IndexSnapshotRow[]>([]);
   const [primaryData, setPrimaryData] = useState<OhlcvResponse | null>(null);
   const [compareData, setCompareData] = useState<CompareResponse | null>(null);
   const [corrData, setCorrData] = useState<CorrelationResponse | null>(null);
+  const [compareRawSeries, setCompareRawSeries] = useState<Array<{ symbol: string; points: SeriesPoint[] }>>([]);
 
   const [loadingPrimary, setLoadingPrimary] = useState(false);
   const [loadingCompare, setLoadingCompare] = useState(false);
@@ -386,8 +565,12 @@ export default function DashboardPage() {
   const primaryInputRef = useRef<HTMLInputElement>(null);
   const compareInputRef = useRef<HTMLInputElement>(null);
 
-  const primaryMatches = useSearch(primaryInput).filter((item) => item.type === "stock");
-  const compareMatches = useSearch(compareInput).filter((item) => item.type === "stock");
+  const primaryMatches = useSearch(primaryInput);
+  const compareMatches = useSearch(compareInput);
+  const primaryTarget = useMemo<Target>(
+    () => ({ type: primaryUniverse, code: primarySymbol }),
+    [primaryUniverse, primarySymbol],
+  );
 
   const timeframeRange = useMemo(() => rangeForTimeframe(timeframe), [timeframe]);
   const range = rangeOverride ?? timeframeRange;
@@ -427,28 +610,31 @@ export default function DashboardPage() {
     setEndInput(timeframeRange.endDate);
   }
 
-  function addCompareSymbol(symbol: string): void {
-    const normalized = symbol.trim().toUpperCase();
-    if (!normalized || normalized === primarySymbol) {
+  function addCompareTarget(target: Target): void {
+    if (!target.code || targetKey(target) === targetKey(primaryTarget)) {
       return;
     }
-    setCompareSymbols((prev) => {
-      if (prev.includes(normalized) || prev.length >= 5) {
+    setCompareTargets((prev) => {
+      if (prev.length >= 5) {
         return prev;
       }
-      return [...prev, normalized];
+      const exists = prev.some((item) => targetKey(item) === targetKey(target));
+      if (exists) {
+        return prev;
+      }
+      return [...prev, target];
     });
     setCompareInput("");
     setCompareEnabled(true);
   }
 
-  function removeCompareSymbol(symbol: string): void {
-    setCompareSymbols((prev) => prev.filter((item) => item !== symbol));
+  function removeCompareTarget(target: Target): void {
+    setCompareTargets((prev) => prev.filter((item) => targetKey(item) !== targetKey(target)));
   }
 
   useEffect(() => {
-    setCompareSymbols((prev) => prev.filter((item) => item !== primarySymbol));
-  }, [primarySymbol]);
+    setCompareTargets((prev) => prev.filter((item) => targetKey(item) !== targetKey(primaryTarget)));
+  }, [primaryTarget]);
 
   useEffect(() => {
     fetchIndexSnapshot()
@@ -461,7 +647,7 @@ export default function DashboardPage() {
     setError(null);
     fetchOhlcv({
       symbol: primarySymbol,
-      universe: "stock",
+      universe: primaryUniverse,
       interval,
       startDate: range.startDate,
       endDate: range.endDate,
@@ -472,7 +658,7 @@ export default function DashboardPage() {
         setError(err instanceof Error ? err.message : "Failed to load primary OHLCV");
       })
       .finally(() => setLoadingPrimary(false));
-  }, [primarySymbol, interval, range.endDate, range.startDate]);
+  }, [primarySymbol, primaryUniverse, interval, range.endDate, range.startDate]);
 
   useEffect(() => {
     if (!detailOpen) {
@@ -482,7 +668,7 @@ export default function DashboardPage() {
     setDetailError(null);
     fetchOhlcv({
       symbol: primarySymbol,
-      universe: "stock",
+      universe: primaryUniverse,
       interval,
       startDate: range.startDate,
       endDate: range.endDate,
@@ -490,21 +676,24 @@ export default function DashboardPage() {
       .then((rows) => setPrimaryData(rows))
       .catch((err) => setDetailError(err instanceof Error ? err.message : "Failed to load symbol detail"))
       .finally(() => setDetailLoading(false));
-  }, [detailOpen, primarySymbol, interval, range.endDate, range.startDate]);
+  }, [detailOpen, primarySymbol, primaryUniverse, interval, range.endDate, range.startDate]);
 
   const compareUniverse = useMemo(() => {
-    const unique = [primarySymbol, ...compareSymbols].filter((value, idx, arr) => arr.indexOf(value) === idx);
-    return unique.slice(0, 6);
-  }, [primarySymbol, compareSymbols]);
+    const map = new Map<string, Target>();
+    [primaryTarget, ...compareTargets].forEach((target) => map.set(targetKey(target), target));
+    return Array.from(map.values()).slice(0, 6);
+  }, [primaryTarget, compareTargets]);
 
   useEffect(() => {
     if (!compareEnabled) {
+      setCompareRawSeries([]);
       setCompareData(null);
       setCorrData(null);
       setCompareError(null);
       return;
     }
-    if (compareUniverse.length < 3) {
+    if (compareUniverse.length < 2) {
+      setCompareRawSeries([]);
       setCompareData(null);
       setCorrData(null);
       setCompareError(null);
@@ -513,35 +702,113 @@ export default function DashboardPage() {
 
     setLoadingCompare(true);
     setCompareError(null);
-    Promise.all([
-      fetchCompare({
-        symbols: compareUniverse,
-        universe: "stock",
-        interval,
-        normalizedBase,
-        startDate: range.startDate,
-        endDate: range.endDate,
+    Promise.all(
+      compareUniverse.map(async (target) => {
+        const payload = await fetchOhlcv({
+          symbol: target.code,
+          universe: target.type,
+          interval,
+          startDate: range.startDate,
+          endDate: range.endDate,
+        });
+        return { target, payload };
       }),
-      fetchCorrelation({
-        symbols: compareUniverse,
-        universe: "stock",
-        interval,
-        window: interval === "1w" ? 52 : 252,
-        startDate: range.startDate,
-        endDate: range.endDate,
-      }),
-    ])
-      .then(([compareRows, corrRows]) => {
-        setCompareData(compareRows);
-        setCorrData(corrRows);
+    )
+      .then((rows) => {
+        const raw = rows.map(({ target, payload }) => ({
+          symbol: targetLabel(target),
+          points: payload.points,
+        }));
+        setCompareRawSeries(raw);
+
+        const universeSet = new Set(rows.map((row) => row.target.type));
+        const universeType: "stock" | "index" | "mixed" = universeSet.size > 1 ? "mixed" : rows[0].target.type;
+
+        const series = raw.map((row) => {
+          const points = [...row.points].sort((a, b) => a.date.localeCompare(b.date));
+          if (points.length === 0 || points[0].close === 0) {
+            return {
+              symbol: row.symbol,
+              base_close: 0,
+              normalized_base: normalizedBase,
+              period_return_pct: 0,
+              normalized: [],
+            };
+          }
+          const base = points[0].close;
+          const normalized = points.map((point) => ({
+            date: point.date,
+            value: (point.close / base) * normalizedBase,
+          }));
+          return {
+            symbol: row.symbol,
+            base_close: base,
+            normalized_base: normalizedBase,
+            period_return_pct: ((points[points.length - 1].close / base) - 1) * 100,
+            normalized,
+          };
+        });
+        setCompareData({
+          universe: universeType,
+          interval,
+          normalized_base: normalizedBase,
+          start_date: range.startDate,
+          end_date: range.endDate,
+          series,
+        });
+
+        const returnsMap = new Map<string, Map<string, number>>();
+        raw.forEach((row) => {
+          const ret = new Map<string, number>();
+          const points = [...row.points].sort((a, b) => a.date.localeCompare(b.date));
+          for (let i = 1; i < points.length; i += 1) {
+            const prev = points[i - 1].close;
+            const curr = points[i].close;
+            if (prev > 0) {
+              ret.set(points[i].date, (curr / prev) - 1);
+            }
+          }
+          returnsMap.set(row.symbol, ret);
+        });
+
+        const symbols = raw.map((row) => row.symbol);
+        const matrix: CorrelationResponse["matrix"] = [];
+        for (const a of symbols) {
+          for (const b of symbols) {
+            const da = returnsMap.get(a) ?? new Map<string, number>();
+            const db = returnsMap.get(b) ?? new Map<string, number>();
+            const common = Array.from(da.keys()).filter((d) => db.has(d)).sort();
+            const x = common.map((d) => da.get(d)!);
+            const y = common.map((d) => db.get(d)!);
+            matrix.push({
+              symbol_a: a,
+              symbol_b: b,
+              correlation: corr(x, y),
+              observations: common.length,
+            });
+          }
+        }
+        setCorrData({
+          universe: universeType,
+          interval,
+          window: interval === "1w" ? 52 : 252,
+          start_date: range.startDate,
+          end_date: range.endDate,
+          matrix,
+        });
       })
       .catch((err) => {
+        setCompareRawSeries([]);
         setCompareData(null);
         setCorrData(null);
         setCompareError(err instanceof Error ? err.message : "Failed to load compare analytics");
       })
       .finally(() => setLoadingCompare(false));
   }, [compareEnabled, compareUniverse, interval, normalizedBase, range.endDate, range.startDate]);
+
+  useEffect(() => {
+    setRollingWindow(interval === "1w" ? 26 : 60);
+  }, [interval]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -596,6 +863,7 @@ export default function DashboardPage() {
   }, [detailOpen]);
 
   const primaryPoints = primaryData?.points ?? [];
+  const primaryTargetLabel = targetLabel(primaryTarget);
   const primaryLast = primaryPoints.length ? primaryPoints[primaryPoints.length - 1] : null;
   const change = firstLastChange(primaryPoints);
   const vol = computeVolatility(primaryPoints, interval === "1w" ? 52 : 252);
@@ -615,21 +883,44 @@ export default function DashboardPage() {
     }
     return [
       {
-        name: primarySymbol,
+        name: primaryTargetLabel,
         color: CHART_COLORS[0],
         points: primaryPoints.map((point) => ({ date: point.date, value: point.close })),
       },
     ];
-  }, [compareEnabled, compareData, primaryPoints, primarySymbol]);
+  }, [compareEnabled, compareData, primaryPoints, primaryTargetLabel]);
 
   const correlationSymbols = useMemo(() => {
     if (compareData?.series?.length) {
       return compareData.series.map((row) => row.symbol);
     }
-    return compareUniverse;
+    return compareUniverse.map((target) => targetLabel(target));
   }, [compareData, compareUniverse]);
 
-  const canAddMoreCompare = compareSymbols.length < 5;
+  const rollingCompareLines = useMemo<LineSeries[]>(() => {
+    if (!compareEnabled || compareRawSeries.length < 2) {
+      return [];
+    }
+    const primarySeries =
+      compareRawSeries.find((series) => series.symbol === primaryTargetLabel) ?? compareRawSeries[0];
+    const secondarySeries = compareRawSeries.find((series) => series.symbol !== primarySeries.symbol);
+    if (!secondarySeries) {
+      return [];
+    }
+    const points = rollingCorrelationSeries(primarySeries.points, secondarySeries.points, rollingWindow);
+    if (points.length === 0) {
+      return [];
+    }
+    return [
+      {
+        name: `Rolling Corr ${primarySeries.symbol} vs ${secondarySeries.symbol}`,
+        color: "#5cd1ff",
+        points: points.map((point) => ({ date: point.date, value: point.value })),
+      },
+    ];
+  }, [compareEnabled, compareRawSeries, primaryTargetLabel, rollingWindow]);
+
+  const canAddMoreCompare = compareTargets.length < 5;
 
   return (
     <main className="min-h-screen p-4 text-terminal-text md:p-5">
@@ -662,7 +953,9 @@ export default function DashboardPage() {
             >
               Daily
             </button>
-            <span className="rounded border border-terminal-border bg-slate-950 px-2 py-1 text-slate-300">Ticker: {primarySymbol}</span>
+            <span className="rounded border border-terminal-border bg-slate-950 px-2 py-1 text-slate-300">
+              Ticker: {primaryTargetLabel}
+            </span>
             <span className="rounded border border-terminal-border bg-slate-950 px-2 py-1 text-slate-300">
               {range.startDate} to {range.endDate}
             </span>
@@ -671,7 +964,15 @@ export default function DashboardPage() {
 
         <section className="grid grid-cols-1 gap-3 md:grid-cols-4">
           {indexRows.map((row) => (
-            <article key={row.index_name} className="grid-panel p-3">
+            <button
+              key={row.index_name}
+              className="grid-panel p-3 text-left transition-colors hover:bg-slate-900/70"
+              onClick={() => {
+                setPrimaryUniverse("index");
+                setPrimarySymbol(row.index_name);
+                setPrimaryInput(row.index_name);
+              }}
+            >
               <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400">{row.index_name}</div>
               <div className="numeric mt-2 text-2xl font-semibold text-white">{numberFmt(row.close)}</div>
               <div
@@ -682,7 +983,7 @@ export default function DashboardPage() {
               >
                 {percent(row.pct_change)}
               </div>
-            </article>
+            </button>
           ))}
         </section>
 
@@ -696,19 +997,22 @@ export default function DashboardPage() {
               className="numeric mt-2 w-full rounded border border-terminal-border bg-black/70 px-3 py-2 text-sm text-white outline-none focus:border-terminal-accent"
               value={primaryInput}
               onChange={(e) => setPrimaryInput(e.target.value.toUpperCase())}
-              placeholder="Search stock"
+              placeholder="Search stock or index"
             />
-            <div className="mt-2 max-h-36 overflow-auto">
-              {primaryMatches.slice(0, 8).map((item) => (
+            <div className="mt-2 max-h-52 overflow-auto">
+              {primaryMatches.slice(0, 20).map((item) => (
                 <button
-                  key={`${item.code}-primary`}
+                  key={`${item.type}-${item.code}-primary`}
                   className="w-full border-b border-slate-800 px-2 py-2 text-left text-xs hover:bg-slate-800/50"
                   onClick={() => {
+                    setPrimaryUniverse(item.type);
                     setPrimarySymbol(item.code);
                     setPrimaryInput(item.code);
                   }}
                 >
-                  <span className="numeric text-terminal-accent">{item.code}</span>{" "}
+                  <span className={cls("numeric", item.type === "index" ? "text-terminal-cyan" : "text-terminal-accent")}>
+                    {item.type === "index" ? "IDX" : "STK"}:{item.code}
+                  </span>{" "}
                   <span className="text-slate-400">{item.name}</span>
                 </button>
               ))}
@@ -731,7 +1035,7 @@ export default function DashboardPage() {
               </div>
 
               <div className="numeric mt-2 text-[11px] text-slate-500">
-                Symbols: {compareUniverse.length}/6 (target 3-6 for full analytics)
+                Symbols: {compareUniverse.length}/6 (2-6 supported, 3-6 recommended)
               </div>
 
               <input
@@ -742,15 +1046,17 @@ export default function DashboardPage() {
                 onChange={(e) => setCompareInput(e.target.value.toUpperCase())}
                 placeholder={canAddMoreCompare ? "Add comparison symbol" : "Max 6 symbols reached"}
               />
-              <div className="mt-2 max-h-28 overflow-auto">
+              <div className="mt-2 max-h-40 overflow-auto">
                 {compareEnabled &&
-                  compareMatches.slice(0, 8).map((item) => (
+                  compareMatches.slice(0, 20).map((item) => (
                     <button
-                      key={`${item.code}-compare`}
+                      key={`${item.type}-${item.code}-compare`}
                       className="w-full border-b border-slate-800 px-2 py-2 text-left text-xs hover:bg-slate-800/50"
-                      onClick={() => addCompareSymbol(item.code)}
+                      onClick={() => addCompareTarget({ type: item.type, code: item.code })}
                     >
-                      <span className="numeric text-terminal-cyan">{item.code}</span>{" "}
+                      <span className={cls("numeric", item.type === "index" ? "text-terminal-cyan" : "text-terminal-accent")}>
+                        {item.type === "index" ? "IDX" : "STK"}:{item.code}
+                      </span>{" "}
                       <span className="text-slate-400">{item.name}</span>
                     </button>
                   ))}
@@ -758,16 +1064,16 @@ export default function DashboardPage() {
 
               <div className="mt-2 flex flex-wrap gap-2">
                 <span className="numeric rounded border border-terminal-accent bg-terminal-accent/15 px-2 py-1 text-[11px] text-terminal-accent">
-                  {primarySymbol} (primary)
+                  {primaryTargetLabel} (primary)
                 </span>
-                {compareSymbols.map((symbol) => (
+                {compareTargets.map((target) => (
                   <button
-                    key={`chip-${symbol}`}
-                    onClick={() => removeCompareSymbol(symbol)}
+                    key={`chip-${targetKey(target)}`}
+                    onClick={() => removeCompareTarget(target)}
                     className="numeric rounded border border-terminal-cyan/60 bg-terminal-cyan/10 px-2 py-1 text-[11px] text-terminal-cyan"
                     title="Remove"
                   >
-                    {symbol} x
+                    {targetLabel(target)} x
                   </button>
                 ))}
               </div>
@@ -847,7 +1153,7 @@ export default function DashboardPage() {
               <div>
                 <div className="text-xs uppercase tracking-[0.18em] text-slate-400">Chart View</div>
                 <div className="numeric mt-1 text-lg text-white">
-                  {compareEnabled ? compareUniverse.join(" vs ") : primarySymbol}
+                  {compareEnabled ? compareUniverse.map((target) => targetLabel(target)).join(" vs ") : primaryTargetLabel}
                 </div>
               </div>
               <div className="numeric flex items-center gap-2 text-xs text-slate-400">
@@ -862,13 +1168,44 @@ export default function DashboardPage() {
             {compareError ? (
               <div className="rounded border border-terminal-red/40 bg-terminal-red/10 p-3 text-sm text-terminal-red">{compareError}</div>
             ) : null}
-            {compareEnabled && compareUniverse.length < 3 ? (
+            {compareEnabled && compareUniverse.length < 2 ? (
               <div className="rounded border border-terminal-cyan/40 bg-terminal-cyan/10 p-3 text-xs text-terminal-cyan">
-                Add symbols until total is at least 3 to unlock compare analytics.
+                Add one comparison symbol to start normalized compare charts.
+              </div>
+            ) : null}
+            {compareEnabled && compareUniverse.length === 2 ? (
+              <div className="rounded border border-terminal-cyan/40 bg-terminal-cyan/10 p-3 text-xs text-terminal-cyan">
+                Two-symbol compare is active. Add more symbols for broader cross-sectional analysis.
               </div>
             ) : null}
 
             <MiniLineChart series={chartLines} />
+            {compareEnabled ? (
+              <div className="grid-panel p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-xs uppercase tracking-[0.16em] text-terminal-cyan">Rolling Correlation</div>
+                  <div className="flex items-center gap-2">
+                    <span className="numeric text-[11px] text-slate-400">Window</span>
+                    <select
+                      value={rollingWindow}
+                      onChange={(e) => setRollingWindow(Number(e.target.value))}
+                      className="numeric rounded border border-terminal-border bg-black/70 px-2 py-1 text-xs text-white outline-none focus:border-terminal-cyan"
+                    >
+                      {(interval === "1w" ? [12, 26, 52] : [20, 60, 120]).map((w) => (
+                        <option key={`roll-${w}`} value={w}>
+                          {w}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                {rollingCompareLines.length ? (
+                  <MiniLineChart series={rollingCompareLines} valueFormatter={(value) => value.toFixed(3)} />
+                ) : (
+                  <div className="text-xs text-slate-500">Not enough overlapping history for rolling correlation yet.</div>
+                )}
+              </div>
+            ) : null}
 
             <div className="grid-panel overflow-auto">
               <table className="w-full min-w-[640px] text-xs">
@@ -950,9 +1287,7 @@ export default function DashboardPage() {
 
             <article className="grid-panel p-4">
               <div className="text-xs uppercase tracking-[0.16em] text-terminal-cyan">Correlation Matrix</div>
-              <div className="numeric mt-2 text-[11px] text-slate-500">
-                Interval {interval} | window {interval === "1w" ? 52 : 252}
-              </div>
+              <div className="numeric mt-2 text-[11px] text-slate-500">Interval {interval} | pairwise overlap basis</div>
               <div className="mt-3">
                 {compareEnabled ? (
                   <CorrelationMatrix symbols={correlationSymbols} data={corrData} />
@@ -992,7 +1327,7 @@ export default function DashboardPage() {
 
       <SymbolDetailDrawer
         open={detailOpen}
-        symbol={primarySymbol}
+        symbol={primaryTargetLabel}
         interval={interval}
         range={range}
         data={primaryData}
