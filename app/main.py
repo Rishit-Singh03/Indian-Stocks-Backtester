@@ -77,6 +77,7 @@ def load_series_rows(
     end_date: date,
 ) -> list[dict[str, Any]]:
     db = validate_identifier(settings.clickhouse_database)
+    universe_snapshot_tbl = validate_identifier(settings.universe_snapshot_table)
     if universe == "stock":
         if interval == "1d":
             target = validate_identifier(settings.prices_table)
@@ -98,7 +99,88 @@ def load_series_rows(
     start_sql = sql_string(start_date.isoformat())
     end_sql = sql_string(end_date.isoformat())
 
-    if interval == "1d" or universe == "stock":
+    if universe == "stock" and interval == "1d":
+        query = f"""
+SELECT
+    p.{symbol_column} AS symbol,
+    p.{date_column} AS date,
+    p.open,
+    p.high,
+    p.low,
+    p.close,
+    p.volume
+FROM {db}.{target} p
+WHERE p.{symbol_column} IN ({list_sql})
+  AND p.{date_column} BETWEEN {start_sql} AND {end_sql}
+  AND (p.{symbol_column}, toDate(toStartOfWeek(p.{date_column}, 1))) IN
+  (
+      SELECT symbol, week_start
+      FROM {db}.{universe_snapshot_tbl}
+      WHERE is_active = 1
+        AND symbol IN ({list_sql})
+        AND week_start BETWEEN toDate(toStartOfWeek(toDate({start_sql}), 1)) AND toDate(toStartOfWeek(toDate({end_sql}), 1))
+  )
+ORDER BY symbol, date
+FORMAT JSONEachRow
+""".strip()
+        return ch.query_rows(query)
+
+    if universe == "stock" and interval == "1w":
+        query = f"""
+SELECT
+    p.{symbol_column} AS symbol,
+    p.{date_column} AS date,
+    p.open,
+    p.high,
+    p.low,
+    p.close,
+    p.volume
+FROM {db}.{target} p
+WHERE p.{symbol_column} IN ({list_sql})
+  AND p.{date_column} BETWEEN toDate(toStartOfWeek(toDate({start_sql}), 1)) AND toDate(toStartOfWeek(toDate({end_sql}), 1))
+  AND (p.{symbol_column}, p.{date_column}) IN
+  (
+      SELECT symbol, week_start
+      FROM {db}.{universe_snapshot_tbl}
+      WHERE is_active = 1
+        AND symbol IN ({list_sql})
+        AND week_start BETWEEN toDate(toStartOfWeek(toDate({start_sql}), 1)) AND toDate(toStartOfWeek(toDate({end_sql}), 1))
+  )
+ORDER BY symbol, date
+FORMAT JSONEachRow
+""".strip()
+        return ch.query_rows(query)
+
+    if universe == "stock" and interval == "1mo":
+        query = f"""
+SELECT
+    p.{symbol_column} AS symbol,
+    p.{date_column} AS date,
+    p.open,
+    p.high,
+    p.low,
+    p.close,
+    p.volume
+FROM {db}.{target} p
+WHERE p.{symbol_column} IN ({list_sql})
+  AND p.{date_column} BETWEEN toDate(toStartOfMonth(toDate({start_sql}))) AND toDate(toStartOfMonth(toDate({end_sql})))
+  AND (p.{symbol_column}, p.{date_column}) IN
+  (
+      SELECT
+          symbol,
+          toDate(toStartOfMonth(week_start)) AS month_start
+      FROM {db}.{universe_snapshot_tbl}
+      WHERE is_active = 1
+        AND symbol IN ({list_sql})
+        AND week_start BETWEEN toDate(toStartOfWeek(toDate({start_sql}), 1)) AND toDate(toStartOfWeek(toDate({end_sql}), 1))
+      GROUP BY symbol, month_start
+  )
+ORDER BY symbol, date
+FORMAT JSONEachRow
+""".strip()
+        return ch.query_rows(query)
+
+    if universe == "index" and interval == "1d":
         query = f"""
 SELECT
     {symbol_column} AS symbol,
