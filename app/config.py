@@ -40,6 +40,9 @@ class Settings:
     clickhouse_user: str
     clickhouse_password: str
     prices_table: str
+    weekly_prices_table: str
+    monthly_prices_table: str
+    universe_snapshot_table: str
     ticker_table: str
     index_table: str
     cors_origins: list[str]
@@ -57,6 +60,9 @@ def get_settings() -> Settings:
         clickhouse_user=env_or_dotenv(dotenv, "CLICKHOUSE_USER", "CH_USER", default="default"),
         clickhouse_password=env_or_dotenv(dotenv, "CLICKHOUSE_PASSWORD", "CH_PASSWORD", default=""),
         prices_table=env_or_dotenv(dotenv, "OHLCV_TABLE", default="DailyPricesBhavcopy"),
+        weekly_prices_table=env_or_dotenv(dotenv, "WEEKLY_PRICES_TABLE", default="WeeklyPrices"),
+        monthly_prices_table=env_or_dotenv(dotenv, "MONTHLY_PRICES_TABLE", default="MonthlyPrices"),
+        universe_snapshot_table=env_or_dotenv(dotenv, "UNIVERSE_SNAPSHOT_TABLE", default="UniverseSnapshot"),
         ticker_table=env_or_dotenv(dotenv, "CLICKHOUSE_TABLE", default="TickerMaster"),
         index_table=env_or_dotenv(dotenv, "INDEX_TABLE", default="IndexDaily"),
         cors_origins=cors_origins,

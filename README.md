@@ -32,6 +32,11 @@ CLICKHOUSE_DATABASE=market
 CLICKHOUSE_TABLE=TickerMaster
 OHLCV_TABLE=DailyPricesBhavcopy
 INDEX_TABLE=IndexDaily
+CORPORATE_ACTIONS_TABLE=CorporateActions
+ADJUSTED_PRICES_TABLE=AdjustedDailyPrices
+WEEKLY_PRICES_TABLE=WeeklyPrices
+MONTHLY_PRICES_TABLE=MonthlyPrices
+UNIVERSE_SNAPSHOT_TABLE=UniverseSnapshot
 CLICKHOUSE_USER=your_clickhouse_user
 CLICKHOUSE_PASSWORD=your_clickhouse_password
 ```
@@ -67,10 +72,10 @@ Implemented endpoints:
 - `GET /api/v1/health`
 - `GET /api/v1/search?q=...`
 - `GET /api/v1/indexes/snapshot?on_date=YYYY-MM-DD`
-- `GET /api/v1/series?symbols=...&universe=stock|index&interval=1d|1w`
-- `GET /api/v1/ohlcv/{symbol}?universe=stock|index&interval=1d|1w`
-- `GET /api/v1/compare?symbols=...&universe=stock|index&interval=1d|1w&normalized_base=100`
-- `GET /api/v1/correlation?symbols=...&universe=stock|index&interval=1d|1w&window=52`
+- `GET /api/v1/series?symbols=...&universe=stock|index&interval=1d|1w|1mo`
+- `GET /api/v1/ohlcv/{symbol}?universe=stock|index&interval=1d|1w|1mo`
+- `GET /api/v1/compare?symbols=...&universe=stock|index&interval=1d|1w|1mo&normalized_base=100`
+- `GET /api/v1/correlation?symbols=...&universe=stock|index&interval=1d|1w|1mo&window=52`
 
 ## 3) Create `TickerMaster` Table (one-time)
 Run this once before symbol ingestion:
@@ -201,6 +206,90 @@ Behavior:
 - Default start is `max(date) + 1`
 - Automatically catches up missed days if machine was down
 - Optional repair mode: `--replay-days 7`
+
+## 10) Phase 1 Data Hardening (Corporate Actions + Adjusted Prices)
+Script: `scripts/phase1_data_hardening.py`
+
+Create Phase 1 tables:
+
+```bash
+uv run python scripts/phase1_data_hardening.py init-tables
+```
+
+Load corporate actions from CSV:
+
+```bash
+uv run python scripts/phase1_data_hardening.py load-actions --csv data/corporate_actions.csv
+```
+
+CSV should include at least:
+- `symbol` or `bse_code`
+- `action_type` (recommended: `SPLIT`, `BONUS`, `DIVIDEND`, `RIGHTS`)
+- `ex_date`
+- Optional: `ratio_from`, `ratio_to`, `announcement_date`, `source`, `notes`
+
+Rebuild adjusted daily prices (split/bonus adjusted):
+
+```bash
+uv run python scripts/phase1_data_hardening.py rebuild-adjusted --truncate-first
+```
+
+Optional bounded rebuild:
+
+```bash
+uv run python scripts/phase1_data_hardening.py rebuild-adjusted --start-date 2020-01-01 --end-date 2024-12-31 --truncate-first
+```
+
+Validate continuity around split/bonus events:
+
+```bash
+uv run python scripts/phase1_data_hardening.py validate-splits --limit 20
+```
+
+Create aggregate tables (weekly/monthly/universe):
+
+```bash
+uv run python scripts/phase1_data_hardening.py init-agg-tables
+```
+
+Rebuild all aggregates from `AdjustedDailyPrices`:
+
+```bash
+uv run python scripts/phase1_data_hardening.py rebuild-aggregates --truncate-first
+```
+
+Optional bounded aggregate rebuild:
+
+```bash
+uv run python scripts/phase1_data_hardening.py rebuild-aggregates --start-date 2020-01-01 --end-date 2024-12-31 --truncate-first
+```
+
+Rebuild only weekly + universe (skip monthly):
+
+```bash
+uv run python scripts/phase1_data_hardening.py rebuild-aggregates --truncate-first --skip-monthly
+```
+
+### Programmatic Corporate Actions (No Manual CSV)
+Script: `scripts/fetch_corporate_actions_yf.py`
+
+This uses `TickerMaster.yahoo_ticker` and fetches split actions (optional dividends) from yfinance.
+
+```bash
+uv run python scripts/fetch_corporate_actions_yf.py --limit 1000 --truncate-first --verbose
+```
+
+Include dividends and export a CSV snapshot:
+
+```bash
+uv run python scripts/fetch_corporate_actions_yf.py --limit 1000 --include-dividends --truncate-first --export-csv data/corporate_actions_auto.csv
+```
+
+Then rebuild adjusted prices:
+
+```bash
+uv run python scripts/phase1_data_hardening.py rebuild-adjusted --truncate-first
+```
 
 ## Validation Queries
 Check symbol master:

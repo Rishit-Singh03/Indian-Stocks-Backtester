@@ -14,6 +14,7 @@ from app.config import get_settings
 
 
 settings = get_settings()
+Interval = Literal["1d", "1w", "1mo"]
 app = FastAPI(title="Stock Dashboard API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -71,22 +72,37 @@ def table_name(which: Literal["stock", "index", "ticker"]) -> str:
 def load_series_rows(
     symbols: list[str],
     universe: Literal["stock", "index"],
-    interval: Literal["1d", "1w"],
+    interval: Interval,
     start_date: date,
     end_date: date,
 ) -> list[dict[str, Any]]:
     db = validate_identifier(settings.clickhouse_database)
-    target = table_name("stock" if universe == "stock" else "index")
-    symbol_column = "symbol" if universe == "stock" else "index_name"
+    if universe == "stock":
+        if interval == "1d":
+            target = validate_identifier(settings.prices_table)
+            symbol_column = "symbol"
+            date_column = "date"
+        elif interval == "1w":
+            target = validate_identifier(settings.weekly_prices_table)
+            symbol_column = "symbol"
+            date_column = "week_start"
+        else:
+            target = validate_identifier(settings.monthly_prices_table)
+            symbol_column = "symbol"
+            date_column = "month_start"
+    else:
+        target = validate_identifier(settings.index_table)
+        symbol_column = "index_name"
+        date_column = "date"
     list_sql = sql_string_list(symbols)
     start_sql = sql_string(start_date.isoformat())
     end_sql = sql_string(end_date.isoformat())
 
-    if interval == "1d":
+    if interval == "1d" or universe == "stock":
         query = f"""
 SELECT
     {symbol_column} AS symbol,
-    date,
+    {date_column} AS date,
     open,
     high,
     low,
@@ -94,17 +110,18 @@ SELECT
     volume
 FROM {db}.{target}
 WHERE {symbol_column} IN ({list_sql})
-  AND date BETWEEN {start_sql} AND {end_sql}
+  AND {date_column} BETWEEN {start_sql} AND {end_sql}
 ORDER BY symbol, date
 FORMAT JSONEachRow
 """.strip()
         return ch.query_rows(query)
 
-    # Weekly rollup from daily bars.
+    # Index weekly/monthly rollup from daily bars.
+    bucket_expr = "toDate(toStartOfWeek(date, 1))" if interval == "1w" else "toDate(toStartOfMonth(date))"
     query = f"""
 SELECT
     symbol,
-    week_start AS date,
+    bucket_start AS date,
     argMin(open, date) AS open,
     max(high) AS high,
     min(low) AS low,
@@ -120,13 +137,13 @@ FROM
         low,
         close,
         volume,
-        toDate(toStartOfWeek(date, 1)) AS week_start
+        {bucket_expr} AS bucket_start
     FROM {db}.{target}
     WHERE {symbol_column} IN ({list_sql})
       AND date BETWEEN {start_sql} AND {end_sql}
 )
-GROUP BY symbol, week_start
-ORDER BY symbol, week_start
+GROUP BY symbol, bucket_start
+ORDER BY symbol, bucket_start
 FORMAT JSONEachRow
 """.strip()
     return ch.query_rows(query)
@@ -318,7 +335,7 @@ FORMAT JSONEachRow
 def series(
     symbols: str = Query(..., description="Comma-separated symbols or index names."),
     universe: Literal["stock", "index"] = Query("stock"),
-    interval: Literal["1d", "1w"] = Query("1w"),
+    interval: Interval = Query("1w"),
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, Any]:
@@ -361,7 +378,7 @@ def series(
 def ohlcv(
     symbol: str,
     universe: Literal["stock", "index"] = Query("stock"),
-    interval: Literal["1d", "1w"] = Query("1w"),
+    interval: Interval = Query("1w"),
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, Any]:
@@ -405,7 +422,7 @@ def ohlcv(
 def compare(
     symbols: str = Query(..., description="Comma-separated symbols or index names."),
     universe: Literal["stock", "index"] = Query("stock"),
-    interval: Literal["1d", "1w"] = Query("1w"),
+    interval: Interval = Query("1w"),
     normalized_base: float = Query(100.0, gt=0.0, le=1000000.0),
     start_date: str | None = None,
     end_date: str | None = None,
@@ -463,7 +480,7 @@ def compare(
 def correlation(
     symbols: str = Query(..., description="Comma-separated symbols or index names."),
     universe: Literal["stock", "index"] = Query("stock"),
-    interval: Literal["1d", "1w"] = Query("1w"),
+    interval: Interval = Query("1w"),
     window: int = Query(52, ge=10, le=1000),
     start_date: str | None = None,
     end_date: str | None = None,
@@ -474,7 +491,8 @@ def correlation(
 
     today = datetime.now(timezone.utc).date()
     end_d = parse_date_or_default(end_date, today)
-    default_days = max(365, window * (7 if interval == "1w" else 2))
+    days_per_bar = 7 if interval == "1w" else 31 if interval == "1mo" else 2
+    default_days = max(365, window * days_per_bar)
     start_d = parse_date_or_default(start_date, end_d - timedelta(days=default_days))
     if start_d > end_d:
         raise HTTPException(status_code=400, detail="start_date must be <= end_date")
