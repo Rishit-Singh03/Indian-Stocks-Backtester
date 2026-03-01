@@ -1,6 +1,27 @@
 version = 1
 revision = 3
 requires-python = ">=3.11"
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'emscripten'",
+    "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+
+[[package]]
+name = "bse"
+version = "3.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mthrottle" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/41/92/62a3a24faafc3b35a2e788f99b3af15890f49a234eeb157a55c52e943ce0/bse-3.2.0.tar.gz", hash = "sha256:03f9b237c3984fbe098f27b306e7ed82ff3523a5038b30ab314d0a2cce7f3822", size = 29124, upload-time = "2026-02-25T05:38:14.222Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/7e/d4d0062c344612da8aa635c733e69244179ed337142df7a726608e1f0a91/bse-3.2.0-py3-none-any.whl", hash = "sha256:e838bb16c59e6825f0e7ae1d20673a09651d9389ed53243e86de23669f8dafaa", size = 28419, upload-time = "2026-02-25T05:38:13.084Z" },
+]
 
 [[package]]
 name = "certifi"
@@ -94,6 +115,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mthrottle"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ae/2e/bf9010dc1b2f97ee83fa6f2dd82039dc7893463594218f20c83b3dc8892d/mthrottle-0.0.2.tar.gz", hash = "sha256:c7e771e9fe02c9716e3d825c8a3f97859af693383c070175dd7a69e1a474115a", size = 16238, upload-time = "2023-12-06T18:18:13.647Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/68/0a695fc6fa882a4533401b79454fe5291dd27e7a6b6806cb25b883302171/mthrottle-0.0.2-py3-none-any.whl", hash = "sha256:fc170ff29ec2e76ef57446328720e3c586dd82d9a83ccd79640c7b0f017b3a32", size = 15377, upload-time = "2023-12-06T18:18:11.775Z" },
+]
+
+[[package]]
 name = "requests"
 version = "2.32.5"
 source = { registry = "https://pypi.org/simple" }
@@ -113,11 +143,15 @@ name = "stock"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "bse" },
     { name = "requests" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "requests", specifier = ">=2.32.0" }]
+requires-dist = [
+    { name = "bse", specifier = ">=3.2.0" },
+    { name = "requests", specifier = ">=2.32.0" },
+]
 
 [[package]]
 name = "urllib3"
