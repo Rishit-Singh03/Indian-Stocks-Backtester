@@ -8,11 +8,17 @@ import re
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from app.backtest import run_lite_backtest, validate_lite_spec
+from app.backtest import (
+    lite_payload_to_strategy_spec,
+    run_lite_backtest,
+    strategy_spec_to_lite_payload,
+    validate_lite_spec,
+    validate_strategy_spec,
+)
 from app.backtest.persistence import (
     build_equity_rows,
     build_run_row,
@@ -171,6 +177,91 @@ class BacktestLiteRequest(BaseModel):
 
 class BacktestCompareRequest(BaseModel):
     run_ids: list[str] = Field(..., min_length=2, max_length=10)
+
+
+def _load_benchmark_rows_for_index_relative(index_name: str, interval: Interval, start_d: date, end_d: date) -> list[dict[str, Any]]:
+    benchmark_name = str(index_name).strip().upper()
+    if not benchmark_name:
+        raise HTTPException(status_code=400, detail="index_relative requires params.index_name")
+    try:
+        benchmark_rows = load_series_rows([benchmark_name], "index", interval, start_d, end_d)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed loading benchmark index data: {exc}") from exc
+    if not benchmark_rows:
+        raise HTTPException(status_code=400, detail=f"No benchmark data found for index_name={benchmark_name}")
+    return benchmark_rows
+
+
+def _hydrate_signal_step_for_backtest(
+    step: dict[str, Any],
+    *,
+    interval: Interval,
+    start_d: date,
+    end_d: date,
+) -> dict[str, Any]:
+    tool_name = str(step.get("tool", "")).strip().lower()
+    params = dict(step.get("params", {}))
+    if tool_name == "index_relative":
+        benchmark_name = str(params.get("index_name", "")).strip().upper()
+        params["index_name"] = benchmark_name
+        params["benchmark_rows"] = _load_benchmark_rows_for_index_relative(benchmark_name, interval, start_d, end_d)
+        return {"tool": tool_name, "params": params}
+    if tool_name == "combined_signal":
+        raw_signals = params.get("signals", [])
+        if not isinstance(raw_signals, list):
+            raise HTTPException(status_code=400, detail="combined_signal params.signals must be a list")
+        hydrated: list[dict[str, Any]] = []
+        for idx, signal_step in enumerate(raw_signals):
+            if not isinstance(signal_step, dict):
+                raise HTTPException(status_code=400, detail=f"combined_signal signals[{idx}] must be an object")
+            hydrated.append(
+                _hydrate_signal_step_for_backtest(
+                    signal_step,
+                    interval=interval,
+                    start_d=start_d,
+                    end_d=end_d,
+                )
+            )
+        params["signals"] = hydrated
+        return {"tool": tool_name, "params": params}
+    return {"tool": tool_name, "params": params}
+
+
+def _resolve_backtest_run_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], BacktestLiteRequest, str]:
+    raw_strategy_spec = payload.get("strategy_spec")
+    if isinstance(raw_strategy_spec, dict):
+        try:
+            normalized_full = validate_strategy_spec(registry=TOOL_REGISTRY, strategy_spec=raw_strategy_spec)
+            lite_payload = strategy_spec_to_lite_payload(normalized_full)
+            lite_request = BacktestLiteRequest.model_validate(lite_payload)
+            return normalized_full, lite_request, "full"
+        except ToolValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid strategy spec: {exc}") from exc
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid full->lite mapping: {exc}") from exc
+
+    if isinstance(payload.get("universe"), dict):
+        try:
+            normalized_full = validate_strategy_spec(registry=TOOL_REGISTRY, strategy_spec=payload)
+            lite_payload = strategy_spec_to_lite_payload(normalized_full)
+            lite_request = BacktestLiteRequest.model_validate(lite_payload)
+            return normalized_full, lite_request, "full"
+        except ToolValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid strategy spec: {exc}") from exc
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid full->lite mapping: {exc}") from exc
+
+    try:
+        lite_request = BacktestLiteRequest.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid backtest payload: {exc.errors()}") from exc
+
+    lite_as_full = lite_payload_to_strategy_spec(lite_request.model_dump())
+    try:
+        normalized_full = validate_strategy_spec(registry=TOOL_REGISTRY, strategy_spec=lite_as_full)
+    except ToolValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy spec: {exc}") from exc
+    return normalized_full, lite_request, "lite"
 
 
 def table_name(which: Literal["stock", "index", "ticker"]) -> str:
@@ -433,16 +524,17 @@ def run_signal_tool(request: SignalRunRequest) -> dict[str, Any]:
     params.setdefault("interval", request.interval)
     if tool_name == "index_relative":
         index_name = str(params.get("index_name", "")).strip().upper()
-        if not index_name:
-            raise HTTPException(status_code=400, detail="index_relative requires params.index_name")
-        try:
-            benchmark_rows = load_series_rows([index_name], "index", request.interval, start_d, end_d)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"Failed loading benchmark index data: {exc}") from exc
-        if not benchmark_rows:
-            raise HTTPException(status_code=400, detail=f"No benchmark data found for index_name={index_name}")
         params["index_name"] = index_name
-        params["benchmark_rows"] = benchmark_rows
+        params["benchmark_rows"] = _load_benchmark_rows_for_index_relative(index_name, request.interval, start_d, end_d)
+    if tool_name == "combined_signal":
+        hydrated = _hydrate_signal_step_for_backtest(
+            {"tool": tool_name, "params": params},
+            interval=request.interval,
+            start_d=start_d,
+            end_d=end_d,
+        )
+        params = dict(hydrated["params"])
+        params["_registry"] = TOOL_REGISTRY
     try:
         signals = TOOL_REGISTRY.run_signal(tool_name, rows, params)
     except ToolValidationError as exc:
@@ -575,6 +667,14 @@ def execute_lite_backtest_request(request: BacktestLiteRequest) -> dict[str, Any
     filter_steps = list(normalized_spec["filters"])
     entry_tool = str(normalized_spec["entry"]["tool"])
     entry_params = dict(normalized_spec["entry"]["params"])
+    hydrated_entry = _hydrate_signal_step_for_backtest(
+        {"tool": entry_tool, "params": entry_params},
+        interval=request.interval,
+        start_d=start_d,
+        end_d=end_d,
+    )
+    entry_tool = str(hydrated_entry["tool"])
+    entry_params = dict(hydrated_entry["params"])
     exit_tool = str(normalized_spec["exit"]["tool"])
     exit_params = dict(normalized_spec["exit"]["params"])
     sizing_tool = str(normalized_spec["sizing"]["tool"])
@@ -620,6 +720,74 @@ def execute_lite_backtest_request(request: BacktestLiteRequest) -> dict[str, Any
     }
 
 
+def _finalize_backtest_run(
+    *,
+    run_id: str,
+    created_at: str,
+    strategy_spec: dict[str, Any],
+    lite_request: BacktestLiteRequest,
+) -> None:
+    try:
+        result_payload = execute_lite_backtest_request(lite_request)
+        trade_rows = build_trade_rows(run_id=run_id, trades=list(result_payload.get("trades", [])))
+        equity_rows = build_equity_rows(run_id=run_id, equity_curve=list(result_payload.get("equity_curve", [])))
+        if trade_rows:
+            insert_trade_rows(
+                ch=ch,
+                database=settings.clickhouse_database,
+                trades_table=settings.backtest_trades_table,
+                rows=trade_rows,
+            )
+        if equity_rows:
+            insert_equity_rows(
+                ch=ch,
+                database=settings.clickhouse_database,
+                equity_table=settings.backtest_equity_table,
+                rows=equity_rows,
+            )
+        completed_row = build_run_row(
+            run_id=run_id,
+            status="completed",
+            spec=strategy_spec,
+            result=result_payload,
+            created_at=created_at,
+        )
+        insert_run_row(
+            ch=ch,
+            database=settings.clickhouse_database,
+            runs_table=settings.backtest_runs_table,
+            row=completed_row,
+        )
+    except HTTPException as exc:
+        failed_row = build_run_row(
+            run_id=run_id,
+            status="failed",
+            spec=strategy_spec,
+            error_msg=str(exc.detail),
+            created_at=created_at,
+        )
+        insert_run_row(
+            ch=ch,
+            database=settings.clickhouse_database,
+            runs_table=settings.backtest_runs_table,
+            row=failed_row,
+        )
+    except Exception as exc:  # noqa: BLE001
+        failed_row = build_run_row(
+            run_id=run_id,
+            status="failed",
+            spec=strategy_spec,
+            error_msg=str(exc),
+            created_at=created_at,
+        )
+        insert_run_row(
+            ch=ch,
+            database=settings.clickhouse_database,
+            runs_table=settings.backtest_runs_table,
+            row=failed_row,
+        )
+
+
 @app.post("/api/v1/backtest/run-lite")
 def run_lite_backtest_endpoint(request: BacktestLiteRequest) -> dict[str, Any]:
     return execute_lite_backtest_request(request)
@@ -654,12 +822,23 @@ def validate_lite_backtest_endpoint(request: BacktestLiteRequest) -> dict[str, A
     }
 
 
+@app.post("/api/v1/backtest/validate")
+def validate_backtest_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    strategy_spec, lite_request, spec_format = _resolve_backtest_run_payload(payload)
+    return {
+        "status": "ok",
+        "spec_format": spec_format,
+        "strategy_spec": strategy_spec,
+        "lite_payload": lite_request.model_dump(),
+    }
+
+
 @app.post("/api/v1/backtest/run")
-def run_backtest_endpoint(request: BacktestLiteRequest) -> dict[str, Any]:
+def run_backtest_endpoint(payload: dict[str, Any], background_tasks: BackgroundTasks) -> dict[str, Any]:
     ensure_backtest_storage_ready()
+    strategy_spec, lite_request, spec_format = _resolve_backtest_run_payload(payload)
     run_id = str(uuid4())
-    spec_payload = request.model_dump()
-    running_row = build_run_row(run_id=run_id, status="running", spec=spec_payload)
+    running_row = build_run_row(run_id=run_id, status="running", spec=strategy_spec)
     created_at = str(running_row["created_at"])
     insert_run_row(
         ch=ch,
@@ -667,75 +846,20 @@ def run_backtest_endpoint(request: BacktestLiteRequest) -> dict[str, Any]:
         runs_table=settings.backtest_runs_table,
         row=running_row,
     )
-
-    try:
-        result_payload = execute_lite_backtest_request(request)
-        trade_rows = build_trade_rows(run_id=run_id, trades=list(result_payload.get("trades", [])))
-        equity_rows = build_equity_rows(run_id=run_id, equity_curve=list(result_payload.get("equity_curve", [])))
-        if trade_rows:
-            insert_trade_rows(
-                ch=ch,
-                database=settings.clickhouse_database,
-                trades_table=settings.backtest_trades_table,
-                rows=trade_rows,
-            )
-        if equity_rows:
-            insert_equity_rows(
-                ch=ch,
-                database=settings.clickhouse_database,
-                equity_table=settings.backtest_equity_table,
-                rows=equity_rows,
-            )
-        completed_row = build_run_row(
-            run_id=run_id,
-            status="completed",
-            spec=spec_payload,
-            result=result_payload,
-            created_at=created_at,
-        )
-        insert_run_row(
-            ch=ch,
-            database=settings.clickhouse_database,
-            runs_table=settings.backtest_runs_table,
-            row=completed_row,
-        )
-        return {
-            "run_id": run_id,
-            "status": "completed",
-            "trade_count": len(trade_rows),
-            "equity_points": len(equity_rows),
-            "summary": result_payload.get("summary", {}),
-        }
-    except HTTPException as exc:
-        failed_row = build_run_row(
-            run_id=run_id,
-            status="failed",
-            spec=spec_payload,
-            error_msg=str(exc.detail),
-            created_at=created_at,
-        )
-        insert_run_row(
-            ch=ch,
-            database=settings.clickhouse_database,
-            runs_table=settings.backtest_runs_table,
-            row=failed_row,
-        )
-        raise
-    except Exception as exc:  # noqa: BLE001
-        failed_row = build_run_row(
-            run_id=run_id,
-            status="failed",
-            spec=spec_payload,
-            error_msg=str(exc),
-            created_at=created_at,
-        )
-        insert_run_row(
-            ch=ch,
-            database=settings.clickhouse_database,
-            runs_table=settings.backtest_runs_table,
-            row=failed_row,
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    background_tasks.add_task(
+        _finalize_backtest_run,
+        run_id=run_id,
+        created_at=created_at,
+        strategy_spec=strategy_spec,
+        lite_request=lite_request,
+    )
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "spec_format": spec_format,
+        "status_url": f"/api/v1/backtest/{run_id}/status",
+        "result_url": f"/api/v1/backtest/{run_id}",
+    }
 
 
 @app.get("/api/v1/backtest/history")
@@ -747,7 +871,7 @@ def backtest_history(limit: int = Query(100, ge=1, le=1000), offset: int = Query
 SELECT
     run_id,
     argMax(created_at, updated_at) AS created_at,
-    max(updated_at) AS updated_at,
+    max(updated_at) AS latest_updated_at,
     argMax(status, updated_at) AS status,
     argMax(trade_count, updated_at) AS trade_count,
     argMax(total_return, updated_at) AS total_return,
@@ -761,12 +885,48 @@ LIMIT {int(limit)}
 OFFSET {int(offset)}
 FORMAT JSONEachRow
 """.strip()
-    rows = ch.query_rows(query)
+    rows_raw = ch.query_rows(query)
+    rows = [{**row, "updated_at": row.get("latest_updated_at")} for row in rows_raw]
     return {
         "limit": int(limit),
         "offset": int(offset),
         "count": len(rows),
         "runs": rows,
+    }
+
+
+@app.get("/api/v1/backtest/{run_id}/status")
+def backtest_run_status(run_id: str) -> dict[str, Any]:
+    ensure_backtest_storage_ready()
+    rid = parse_run_id_or_400(run_id)
+    db = validate_identifier(settings.clickhouse_database)
+    runs_tbl = validate_identifier(settings.backtest_runs_table)
+    query = f"""
+SELECT
+    run_id,
+    argMax(created_at, updated_at) AS created_at,
+    max(updated_at) AS latest_updated_at,
+    argMax(status, updated_at) AS status,
+    argMax(error_msg, updated_at) AS error_msg,
+    argMax(trade_count, updated_at) AS trade_count
+FROM {db}.{runs_tbl}
+WHERE run_id = toUUID({sql_string(rid)})
+GROUP BY run_id
+FORMAT JSONEachRow
+""".strip()
+    rows = ch.query_rows(query)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"run_id not found: {rid}")
+    row = rows[0]
+    status = str(row.get("status", "")).strip().lower()
+    return {
+        "run_id": str(row["run_id"]),
+        "status": status,
+        "is_terminal": status in {"completed", "failed"},
+        "created_at": str(row.get("created_at")),
+        "updated_at": str(row.get("latest_updated_at")),
+        "error_msg": str(row.get("error_msg", "")),
+        "trade_count": int(row.get("trade_count", 0) or 0),
     }
 
 
@@ -780,7 +940,7 @@ def backtest_run_details(run_id: str) -> dict[str, Any]:
 SELECT
     run_id,
     argMax(created_at, updated_at) AS created_at,
-    max(updated_at) AS updated_at,
+    max(updated_at) AS latest_updated_at,
     argMax(status, updated_at) AS status,
     argMax(spec_json, updated_at) AS spec_json,
     argMax(metrics_json, updated_at) AS metrics_json,
@@ -815,7 +975,7 @@ FORMAT JSONEachRow
         "run_id": str(row["run_id"]),
         "status": row.get("status"),
         "created_at": str(row.get("created_at")),
-        "updated_at": str(row.get("updated_at")),
+        "updated_at": str(row.get("latest_updated_at")),
         "error_msg": str(row.get("error_msg", "")),
         "trade_count": int(row.get("trade_count", 0) or 0),
         "total_return": float(row.get("total_return", 0.0) or 0.0),
@@ -930,7 +1090,7 @@ def backtest_compare(request: BacktestCompareRequest) -> dict[str, Any]:
 SELECT
     run_id,
     argMax(created_at, updated_at) AS created_at,
-    max(updated_at) AS updated_at,
+    max(updated_at) AS latest_updated_at,
     argMax(status, updated_at) AS status,
     argMax(metrics_json, updated_at) AS metrics_json,
     argMax(trade_count, updated_at) AS trade_count,

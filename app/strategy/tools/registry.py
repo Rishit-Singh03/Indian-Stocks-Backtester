@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.strategy.tools.base import ToolRegistry
+from app.strategy.tools.combined_signal import COMBINED_SIGNAL_SPEC, combined_signal
 from app.strategy.tools.combined_exit import COMBINED_EXIT_SPEC, combined_exit
 from app.strategy.tools.consecutive_moves import CONSECUTIVE_MOVES_SPEC, consecutive_moves_signal
 from app.strategy.tools.distance_from_high_low import DISTANCE_FROM_HIGH_LOW_SPEC, distance_from_high_low_signal
@@ -31,6 +32,7 @@ from app.strategy.tools.volume_spike import VOLUME_SPIKE_SPEC, volume_spike_sign
 
 def build_registry() -> ToolRegistry:
     registry = ToolRegistry()
+    registry.register_signal(COMBINED_SIGNAL_SPEC, combined_signal)
     registry.register_signal(PRICE_CHANGE_SPEC, price_change_signal)
     registry.register_signal(MOVING_AVERAGE_CROSSOVER_SPEC, moving_average_crossover_signal)
     registry.register_signal(DISTANCE_FROM_HIGH_LOW_SPEC, distance_from_high_low_signal)

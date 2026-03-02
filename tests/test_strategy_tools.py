@@ -46,6 +46,15 @@ class StrategyToolsTests(unittest.TestCase):
                 "interval": "1w",
             },
             "rsi": {"period": 14, "overbought": 70, "oversold": 30, "mode": "both", "interval": "1w"},
+            "combined_signal": {
+                "_registry": TOOL_REGISTRY,
+                "combine": "OR",
+                "signals": [
+                    {"tool": "price_change", "params": {"period": "1m", "direction": "down", "threshold_pct": 2.0}},
+                    {"tool": "rsi", "params": {"period": 14, "overbought": 70, "oversold": 30, "mode": "both"}},
+                ],
+                "interval": "1w",
+            },
         }
         for tool, params in signal_cases.items():
             with self.subTest(tool=tool):

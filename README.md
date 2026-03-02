@@ -83,7 +83,9 @@ Implemented endpoints:
 - `POST /api/v1/exits/run`
 - `POST /api/v1/backtest/run-lite`
 - `POST /api/v1/backtest/validate-lite`
+- `POST /api/v1/backtest/validate`
 - `POST /api/v1/backtest/run`
+- `GET /api/v1/backtest/{run_id}/status`
 - `GET /api/v1/backtest/history`
 - `GET /api/v1/backtest/{run_id}`
 - `GET /api/v1/backtest/{run_id}/trades?limit=500&offset=0`
@@ -95,7 +97,12 @@ Implemented endpoints:
 - `GET /api/v1/compare?symbols=...&universe=stock|index&interval=1d|1w|1mo&normalized_base=100`
 - `GET /api/v1/correlation?symbols=...&universe=stock|index&interval=1d|1w|1mo&window=52`
 
-When `POST /api/v1/backtest/run` is used, the API auto-creates ClickHouse tables if missing:
+When `POST /api/v1/backtest/run` is used (lite or full strategy spec), the API:
+- Inserts a `running` row immediately and returns `run_id` quickly.
+- Executes backtest in a background task.
+- Exposes polling status at `GET /api/v1/backtest/{run_id}/status` (or full result at `GET /api/v1/backtest/{run_id}`).
+
+It also auto-creates ClickHouse tables if missing:
 - `BacktestRuns` (run status + summary metrics + spec/result JSON)
 - `TradeLog` (per-trade rows)
 - `BacktestEquityCurve` (equity curve points)
@@ -468,6 +475,48 @@ Spec validation payload for `POST /api/v1/backtest/validate-lite`:
     "tool": "stop_loss",
     "params": {"stop_loss_pct": 10}
   }
+}
+```
+
+Full strategy spec payload for `POST /api/v1/backtest/validate` or `POST /api/v1/backtest/run`:
+
+```json
+{
+  "name": "Weekly Dip Reversion",
+  "description": "Buy weekly dips, exit on stop or timeout",
+  "universe": {
+    "type": "stock",
+    "symbols": ["RELIANCE", "TCS", "INFY"],
+    "filters": [
+      {"tool": "liquidity_filter", "params": {"min_avg_volume": 300000}}
+    ]
+  },
+  "entry": {
+    "signals": [
+      {"tool": "price_change", "params": {"period": "1m", "direction": "down", "threshold_pct": 8}},
+      {"tool": "rsi", "params": {"period": 14, "overbought": 70, "oversold": 30, "mode": "oversold"}}
+    ],
+    "combine": "AND",
+    "rank_by": "price_change",
+    "max_signals_per_period": 3
+  },
+  "exit": {
+    "conditions": [
+      {"tool": "stop_loss", "params": {"stop_loss_pct": 10}},
+      {"tool": "time_based_exit", "params": {"hold_periods": 8}}
+    ],
+    "combine": "FIRST_HIT"
+  },
+  "sizing": {"tool": "fixed_amount", "params": {"amount": 50000}},
+  "execution": {
+    "initial_capital": 1000000,
+    "entry_timing": "next_open",
+    "rebalance": "weekly",
+    "max_positions": 10,
+    "costs": {"slippage_bps": 10, "round_trip_pct": 0.05}
+  },
+  "benchmark": "SENSEX",
+  "date_range": {"start": "2023-01-01", "end": "2026-03-01"}
 }
 ```
 

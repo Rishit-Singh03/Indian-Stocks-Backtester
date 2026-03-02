@@ -297,6 +297,8 @@ def run_lite_backtest(
 
         entry_tool_params = dict(entry_params)
         entry_tool_params.setdefault("interval", interval)
+        if entry_tool == "combined_signal":
+            entry_tool_params["_registry"] = registry
         signals = registry.run_signal(entry_tool, filtered_rows, entry_tool_params)
         todays = [sig for sig in signals if str(sig.get("date", "")) == dt]
         todays.sort(key=lambda row: float(row.get("score", 0.0)), reverse=True)

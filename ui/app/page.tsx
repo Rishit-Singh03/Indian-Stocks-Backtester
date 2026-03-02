@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -931,6 +932,9 @@ export default function DashboardPage() {
             <h1 className="mt-1 text-xl font-semibold text-white md:text-2xl">Historic Analytics Dashboard</h1>
           </div>
           <div className="numeric flex items-center gap-2 text-xs md:text-sm">
+            <Link href="/backtest" className="rounded border border-terminal-border px-2 py-1 text-slate-300 hover:bg-slate-900/70">
+              Backtest Builder
+            </Link>
             <button
               onClick={() => setInterval("1w")}
               className={cls(
