@@ -45,6 +45,9 @@ class Settings:
     universe_snapshot_table: str
     ticker_table: str
     index_table: str
+    backtest_runs_table: str
+    backtest_trades_table: str
+    backtest_equity_table: str
     cors_origins: list[str]
 
 
@@ -65,5 +68,8 @@ def get_settings() -> Settings:
         universe_snapshot_table=env_or_dotenv(dotenv, "UNIVERSE_SNAPSHOT_TABLE", default="UniverseSnapshot"),
         ticker_table=env_or_dotenv(dotenv, "CLICKHOUSE_TABLE", default="TickerMaster"),
         index_table=env_or_dotenv(dotenv, "INDEX_TABLE", default="IndexDaily"),
+        backtest_runs_table=env_or_dotenv(dotenv, "BACKTEST_RUNS_TABLE", default="BacktestRuns"),
+        backtest_trades_table=env_or_dotenv(dotenv, "BACKTEST_TRADES_TABLE", default="TradeLog"),
+        backtest_equity_table=env_or_dotenv(dotenv, "BACKTEST_EQUITY_TABLE", default="BacktestEquityCurve"),
         cors_origins=cors_origins,
     )

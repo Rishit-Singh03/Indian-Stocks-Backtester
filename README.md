@@ -60,6 +60,12 @@ Useful endpoints:
 uv sync
 ```
 
+Run unit tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## 2.1) Start Backend API (FastAPI)
 ```bash
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -71,11 +77,399 @@ Open docs:
 Implemented endpoints:
 - `GET /api/v1/health`
 - `GET /api/v1/search?q=...`
+- `GET /api/v1/tools`
+- `GET /api/v1/tools/registry`
+- `POST /api/v1/signals/run`
+- `POST /api/v1/exits/run`
+- `POST /api/v1/backtest/run-lite`
+- `POST /api/v1/backtest/validate-lite`
+- `POST /api/v1/backtest/run`
+- `GET /api/v1/backtest/history`
+- `GET /api/v1/backtest/{run_id}`
+- `GET /api/v1/backtest/{run_id}/trades?limit=500&offset=0`
+- `GET /api/v1/backtest/{run_id}/equity-curve?limit=5000&offset=0`
+- `POST /api/v1/backtest/compare`
 - `GET /api/v1/indexes/snapshot?on_date=YYYY-MM-DD`
 - `GET /api/v1/series?symbols=...&universe=stock|index&interval=1d|1w|1mo`
 - `GET /api/v1/ohlcv/{symbol}?universe=stock|index&interval=1d|1w|1mo`
 - `GET /api/v1/compare?symbols=...&universe=stock|index&interval=1d|1w|1mo&normalized_base=100`
 - `GET /api/v1/correlation?symbols=...&universe=stock|index&interval=1d|1w|1mo&window=52`
+
+When `POST /api/v1/backtest/run` is used, the API auto-creates ClickHouse tables if missing:
+- `BacktestRuns` (run status + summary metrics + spec/result JSON)
+- `TradeLog` (per-trade rows)
+- `BacktestEquityCurve` (equity curve points)
+
+Phase 2 (first signal tool) example payload for `POST /api/v1/signals/run`:
+
+```json
+{
+  "tool": "price_change",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "period": "1w",
+    "direction": "down",
+    "threshold_pct": 10
+  },
+  "limit": 500
+}
+```
+
+You can also attach ordered filter steps before signal generation:
+
+```json
+{
+  "tool": "price_change",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "filters": [
+    {
+      "tool": "liquidity_filter",
+      "params": {
+        "min_avg_volume": 500000,
+        "window_bars": 12
+      }
+    },
+    {
+      "tool": "price_filter",
+      "params": {
+        "min_price": 200,
+        "max_price": 3000
+      }
+    },
+    {
+      "tool": "listing_age_filter",
+      "params": {
+        "min_weeks": 26
+      }
+    }
+  ],
+  "params": {
+    "period": "1m",
+    "direction": "any",
+    "threshold_pct": 5
+  },
+  "limit": 500
+}
+```
+
+Additional filter examples:
+- `market_cap_filter` (proxy): `{"tool":"market_cap_filter","params":{"rank":"large","window_bars":20,"bucket_pct":33.34}}`
+- `index_membership_filter`: `{"tool":"index_membership_filter","params":{"index_name":"NIFTY_50","membership_symbols":["RELIANCE","TCS","INFY"]}}`
+- `sector_filter`: `{"tool":"sector_filter","params":{"sectors":["IT","BANKING"],"symbol_sector_map":{"TCS":"IT","INFY":"IT","HDFCBANK":"BANKING"}}}`
+
+`moving_average_crossover` example payload:
+
+```json
+{
+  "tool": "moving_average_crossover",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "short_window": 4,
+    "long_window": 12,
+    "cross_direction": "above"
+  },
+  "limit": 500
+}
+```
+
+`distance_from_high_low` example payload:
+
+```json
+{
+  "tool": "distance_from_high_low",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "reference": "high",
+    "lookback_weeks": 52,
+    "distance_pct": 20
+  },
+  "limit": 500
+}
+```
+
+`relative_strength` example payload:
+
+```json
+{
+  "tool": "relative_strength",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "period": "1m",
+    "rank": "top",
+    "count": 3
+  },
+  "limit": 500
+}
+```
+
+`volume_spike` example payload:
+
+```json
+{
+  "tool": "volume_spike",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "multiplier": 1.5,
+    "avg_period": 8
+  },
+  "limit": 500
+}
+```
+
+`consecutive_moves` example payload:
+
+```json
+{
+  "tool": "consecutive_moves",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "direction": "down",
+    "count": 3
+  },
+  "limit": 500
+}
+```
+
+`mean_reversion_zscore` example payload:
+
+```json
+{
+  "tool": "mean_reversion_zscore",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "lookback": 12,
+    "z_threshold": 2.0
+  },
+  "limit": 500
+}
+```
+
+`volatility_rank` example payload:
+
+```json
+{
+  "tool": "volatility_rank",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "lookback_weeks": 26,
+    "rank": "high",
+    "count": 3
+  },
+  "limit": 500
+}
+```
+
+`index_relative` example payload:
+
+```json
+{
+  "tool": "index_relative",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "index_name": "NIFTY_50",
+    "period": "1m",
+    "threshold_pct": 5,
+    "direction": "outperform"
+  },
+  "limit": 500
+}
+```
+
+`rsi` example payload:
+
+```json
+{
+  "tool": "rsi",
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "params": {
+    "period": 14,
+    "overbought": 70,
+    "oversold": 30,
+    "mode": "both"
+  },
+  "limit": 500
+}
+```
+
+Exit tool example payload for `POST /api/v1/exits/run`:
+
+```json
+{
+  "tool": "target_profit",
+  "universe": "stock",
+  "interval": "1w",
+  "positions": [
+    {"symbol": "RELIANCE", "entry_date": "2025-01-06", "entry_price": 1242.35},
+    {"symbol": "TCS", "entry_date": "2025-01-06", "entry_price": 4025.65},
+    {"symbol": "INFY", "entry_date": "2025-01-06", "entry_price": 1908.70}
+  ],
+  "end_date": "2026-03-01",
+  "params": {
+    "target_profit_pct": 10
+  },
+  "limit": 500
+}
+```
+
+`stop_loss` params example:
+
+```json
+{
+  "stop_loss_pct": 10
+}
+```
+
+`time_based_exit` params example:
+
+```json
+{
+  "hold_periods": 8
+}
+```
+
+Additional exit params examples:
+
+```json
+{
+  "trailing_stop_pct": 10
+}
+```
+
+```json
+{
+  "entry_tool": "price_change",
+  "entry_params": {"period": "1m", "direction": "down", "threshold_pct": 8},
+  "reversal_tool": "price_change",
+  "reversal_params": {"period": "1m", "direction": "up", "threshold_pct": 8}
+}
+```
+
+```json
+{
+  "combine": "FIRST_HIT",
+  "conditions": [
+    {"tool": "stop_loss", "params": {"stop_loss_pct": 10}},
+    {"tool": "time_based_exit", "params": {"hold_periods": 8}}
+  ]
+}
+```
+
+Lite backtest payload for `POST /api/v1/backtest/run-lite`:
+
+```json
+{
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "filters": [
+    {"tool": "liquidity_filter", "params": {"min_avg_volume": 300000, "window_bars": 12}},
+    {"tool": "price_filter", "params": {"min_price": 100}}
+  ],
+  "entry": {
+    "tool": "price_change",
+    "params": {"period": "1m", "direction": "down", "threshold_pct": 8}
+  },
+  "exit": {
+    "tool": "stop_loss",
+    "params": {"stop_loss_pct": 10}
+  },
+  "initial_capital": 1000000,
+  "sizing_method": "fixed_amount",
+  "fixed_amount": 50000,
+  "max_positions": 10,
+  "max_new_positions": 3,
+  "slippage_bps": 10,
+  "cost_pct": 0.05,
+  "benchmark": "NIFTY_50"
+}
+```
+
+You can explicitly choose sizing tool in `run-lite` using `sizing`:
+
+```json
+{
+  "sizing": {
+    "tool": "inverse_volatility",
+    "params": {"lookback_bars": 20}
+  }
+}
+```
+
+`run-lite` response includes:
+- `trades[].exit_reason` (tool-triggered exit reason or `forced_last_price_end`)
+- `summary.liquidity_flag_count`
+- `liquidity_flags[]` when participation exceeds 10% of bar volume
+- `returns`, `risk`, `ratios`, `trade_stats`, `monthly_pnl_grid`, `cost_sensitivity` for performance analytics
+- `benchmark_comparison` (alpha, beta, tracking error, information ratio, up/down capture) when `benchmark` is provided
+
+Spec validation payload for `POST /api/v1/backtest/validate-lite`:
+
+```json
+{
+  "universe": "stock",
+  "symbols": ["RELIANCE", "TCS", "INFY"],
+  "interval": "1w",
+  "start_date": "2023-01-01",
+  "end_date": "2026-03-01",
+  "filters": [
+    {"tool": "liquidity_filter", "params": {"min_avg_volume": 300000}}
+  ],
+  "entry": {
+    "tool": "price_change",
+    "params": {"period": "1m", "direction": "down", "threshold_pct": 8}
+  },
+  "exit": {
+    "tool": "stop_loss",
+    "params": {"stop_loss_pct": 10}
+  }
+}
+```
 
 ## 3) Create `TickerMaster` Table (one-time)
 Run this once before symbol ingestion:
