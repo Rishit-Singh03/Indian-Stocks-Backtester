@@ -870,6 +870,18 @@ def backtest_history(limit: int = Query(100, ge=1, le=1000), offset: int = Query
     query = f"""
 SELECT
     run_id,
+    created_at,
+    latest_updated_at,
+    status,
+    trade_count,
+    total_return,
+    sharpe,
+    max_drawdown,
+    error_msg
+FROM
+(
+SELECT
+    run_id,
     argMax(created_at, updated_at) AS created_at,
     max(updated_at) AS latest_updated_at,
     argMax(status, updated_at) AS status,
@@ -880,6 +892,8 @@ SELECT
     argMax(error_msg, updated_at) AS error_msg
 FROM {db}.{runs_tbl}
 GROUP BY run_id
+)
+WHERE status != 'deleted'
 ORDER BY created_at DESC
 LIMIT {int(limit)}
 OFFSET {int(offset)}
@@ -919,6 +933,8 @@ FORMAT JSONEachRow
         raise HTTPException(status_code=404, detail=f"run_id not found: {rid}")
     row = rows[0]
     status = str(row.get("status", "")).strip().lower()
+    if status == "deleted":
+        raise HTTPException(status_code=404, detail=f"run_id not found: {rid}")
     return {
         "run_id": str(row["run_id"]),
         "status": status,
@@ -959,6 +975,8 @@ FORMAT JSONEachRow
     if not rows:
         raise HTTPException(status_code=404, detail=f"run_id not found: {rid}")
     row = rows[0]
+    if str(row.get("status", "")).strip().lower() == "deleted":
+        raise HTTPException(status_code=404, detail=f"run_id not found: {rid}")
     try:
         spec_json = json.loads(str(row.get("spec_json", "{}")))
     except json.JSONDecodeError:
@@ -984,6 +1002,62 @@ FORMAT JSONEachRow
         "spec": spec_json,
         "metrics": metrics_json,
         "result": result_json,
+    }
+
+
+@app.delete("/api/v1/backtest/{run_id}")
+def backtest_delete_run(run_id: str) -> dict[str, Any]:
+    ensure_backtest_storage_ready()
+    rid = parse_run_id_or_400(run_id)
+    db = validate_identifier(settings.clickhouse_database)
+    runs_tbl = validate_identifier(settings.backtest_runs_table)
+    trades_tbl = validate_identifier(settings.backtest_trades_table)
+    equity_tbl = validate_identifier(settings.backtest_equity_table)
+
+    check_query = f"""
+SELECT
+    run_id,
+    argMax(created_at, updated_at) AS created_at,
+    argMax(status, updated_at) AS status
+FROM {db}.{runs_tbl}
+WHERE run_id = toUUID({sql_string(rid)})
+GROUP BY run_id
+FORMAT JSONEachRow
+""".strip()
+    rows = ch.query_rows(check_query)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"run_id not found: {rid}")
+    row = rows[0]
+    current_status = str(row.get("status", "")).strip().lower()
+    if current_status == "deleted":
+        return {"run_id": rid, "status": "deleted", "message": "Run already deleted."}
+
+    created_at = str(row.get("created_at", ""))
+    deleted_row = build_run_row(
+        run_id=rid,
+        status="deleted",
+        spec={"deleted": True, "deleted_run_id": rid},
+        error_msg="Deleted by user request",
+        created_at=created_at or None,
+    )
+    insert_run_row(
+        ch=ch,
+        database=settings.clickhouse_database,
+        runs_table=settings.backtest_runs_table,
+        row=deleted_row,
+    )
+
+    ch.query_text(
+        f"ALTER TABLE {db}.{trades_tbl} DELETE WHERE run_id = toUUID({sql_string(rid)})"
+    )
+    ch.query_text(
+        f"ALTER TABLE {db}.{equity_tbl} DELETE WHERE run_id = toUUID({sql_string(rid)})"
+    )
+
+    return {
+        "run_id": rid,
+        "status": "deleted",
+        "message": "Run marked deleted and cleanup mutations submitted.",
     }
 
 
@@ -1089,6 +1163,18 @@ def backtest_compare(request: BacktestCompareRequest) -> dict[str, Any]:
     query = f"""
 SELECT
     run_id,
+    created_at,
+    latest_updated_at,
+    status,
+    metrics_json,
+    trade_count,
+    total_return,
+    sharpe,
+    max_drawdown
+FROM
+(
+SELECT
+    run_id,
     argMax(created_at, updated_at) AS created_at,
     max(updated_at) AS latest_updated_at,
     argMax(status, updated_at) AS status,
@@ -1100,6 +1186,8 @@ SELECT
 FROM {db}.{runs_tbl}
 WHERE run_id IN ({run_id_sql})
 GROUP BY run_id
+)
+WHERE status != 'deleted'
 ORDER BY created_at DESC
 FORMAT JSONEachRow
 """.strip()

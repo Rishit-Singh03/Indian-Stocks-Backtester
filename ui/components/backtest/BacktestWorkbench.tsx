@@ -12,6 +12,7 @@ import {
   type ToolCategory,
   type ToolSpec,
   compareBacktestRuns,
+  deleteBacktestRun,
   fetchBacktestDetail,
   fetchBacktestEquity,
   fetchBacktestHistory,
@@ -55,6 +56,33 @@ const parseObj = (text: string, label: string): Record<string, unknown> => {
   return parsed as Record<string, unknown>;
 };
 
+function InfoHint({ text }: { text: string }) {
+  return (
+    <span className="group relative ml-1 inline-flex align-middle">
+      <span className="numeric inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-terminal-border text-[10px] text-slate-400">
+        i
+      </span>
+      <span className="pointer-events-none absolute left-5 top-1/2 z-20 w-64 -translate-y-1/2 rounded border border-terminal-border bg-black/95 p-2 text-[11px] text-slate-300 opacity-0 shadow-panel transition-opacity group-hover:opacity-100">
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function paramsPreview(text: string): string {
+  try {
+    const parsed = parseObj(text, "params");
+    const entries = Object.entries(parsed);
+    if (!entries.length) return "Using tool defaults.";
+    return entries
+      .slice(0, 3)
+      .map(([k, v]) => `${k}=${String(v)}`)
+      .join(", ");
+  } catch {
+    return "Invalid JSON params.";
+  }
+}
+
 const defaultsForTool = (tool: ToolSpec | undefined) => {
   const out: Record<string, unknown> = {};
   if (!tool) return out;
@@ -71,12 +99,16 @@ function StepEditor({
   steps,
   onChange,
   tools,
+  beginnerMode,
+  hint,
 }: {
   title: string;
   category: ToolCategory;
   steps: BuilderStep[];
   onChange: (rows: BuilderStep[]) => void;
   tools: ToolSpec[];
+  beginnerMode: boolean;
+  hint?: string;
 }) {
   const add = () => {
     if (!tools.length) return;
@@ -87,7 +119,10 @@ function StepEditor({
   return (
     <div className="grid-panel p-3">
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-[11px] uppercase tracking-[0.14em] text-terminal-cyan">{title}</div>
+        <div className="text-[11px] uppercase tracking-[0.14em] text-terminal-cyan">
+          {title}
+          {hint ? <InfoHint text={hint} /> : null}
+        </div>
         <button onClick={add} className="numeric rounded border border-terminal-border px-2 py-1 text-[11px]">
           + Add
         </button>
@@ -118,11 +153,28 @@ function StepEditor({
               ))}
             </select>
             <textarea
-              rows={4}
+              rows={beginnerMode ? 3 : 4}
               value={s.paramsText}
               onChange={(e) => update(s.id, { paramsText: e.target.value })}
-              className="numeric w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"
+              className={cls(
+                "numeric w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs",
+                beginnerMode ? "hidden" : "",
+              )}
             />
+            {beginnerMode ? (
+              <div className="space-y-2">
+                <div className="rounded border border-terminal-border bg-black/40 px-2 py-1 text-[11px] text-slate-400">{paramsPreview(s.paramsText)}</div>
+                <details className="rounded border border-terminal-border bg-black/30 p-2">
+                  <summary className="cursor-pointer text-[11px] text-slate-400">Advanced params (optional)</summary>
+                  <textarea
+                    rows={4}
+                    value={s.paramsText}
+                    onChange={(e) => update(s.id, { paramsText: e.target.value })}
+                    className="numeric mt-2 w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"
+                  />
+                </details>
+              </div>
+            ) : null}
           </div>
         ))}
       </div>
@@ -133,6 +185,7 @@ function StepEditor({
 export function BacktestWorkbench() {
   const [tools, setTools] = useState<ToolSpec[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [beginnerMode, setBeginnerMode] = useState(true);
   const [name, setName] = useState("Manual Builder Strategy");
   const [symbolsInput, setSymbolsInput] = useState("RELIANCE,TCS,INFY,HDFCBANK");
   const [benchmark, setBenchmark] = useState("SENSEX");
@@ -155,6 +208,8 @@ export function BacktestWorkbench() {
   const [runId, setRunId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [history, setHistory] = useState<BacktestHistoryRow[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<BacktestDetailResponse | null>(null);
   const [equity, setEquity] = useState<Array<{ date: string; equity: number }>>([]);
   const [trades, setTrades] = useState(detail?.result.trades ?? []);
@@ -189,8 +244,13 @@ export function BacktestWorkbench() {
   };
 
   const loadHistory = async () => {
-    const h = await fetchBacktestHistory(80, 0);
-    setHistory(h.runs ?? []);
+    try {
+      const h = await fetchBacktestHistory(80, 0);
+      setHistory(h.runs ?? []);
+      setHistoryError(null);
+    } catch (e) {
+      setHistoryError(e instanceof Error ? e.message : "Failed to load run history");
+    }
   };
 
   const loadRun = async (id: string) => {
@@ -252,9 +312,37 @@ export function BacktestWorkbench() {
       setRunId(res.run_id);
       setStatus(res.status);
       setMessage(`Run submitted: ${res.run_id}`);
+      await loadHistory();
       setErr(null);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Run failed");
+    }
+  };
+
+  const onDeleteRun = async (id: string) => {
+    const ok = window.confirm(`Delete run ${id}? This removes it from history.`);
+    if (!ok) return;
+    try {
+      setDeletingRunId(id);
+      const res = await deleteBacktestRun(id);
+      setMessage(res.message);
+      setHistory((prev) => prev.filter((row) => row.run_id !== id));
+      setCompareSelected((prev) => prev.filter((x) => x !== id));
+      setCompareRows((prev) => prev.filter((x) => x.run_id !== id));
+      if (runId === id) {
+        setRunId(null);
+        setStatus(null);
+        setDetail(null);
+        setTrades([]);
+        setTradeTotal(0);
+        setTradeOffset(0);
+        setEquity([]);
+      }
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setDeletingRunId(null);
     }
   };
 
@@ -268,10 +356,24 @@ export function BacktestWorkbench() {
         <header className="mb-4 grid-panel p-4">
           <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
             <div>
-              <div className="text-xs uppercase tracking-[0.18em] text-terminal-cyan">Phase 5 Manual Builder</div>
+              <div className="text-xs uppercase tracking-[0.18em] text-terminal-cyan">Manual Strategy Builder</div>
               <h1 className="mt-1 text-2xl text-white">Backtest Workbench</h1>
             </div>
             <div className="flex items-center gap-2 text-xs">
+              <label className="numeric inline-flex items-center gap-2 rounded border border-terminal-border px-2 py-1 text-slate-300">
+                Beginner Mode
+                <InfoHint text="ON hides advanced controls and shows simpler guidance. You can still open advanced params when needed." />
+                <button
+                  type="button"
+                  onClick={() => setBeginnerMode((v) => !v)}
+                  className={cls(
+                    "rounded px-2 py-1 text-[11px]",
+                    beginnerMode ? "border border-terminal-green bg-terminal-green/15 text-terminal-green" : "border border-terminal-border text-slate-400",
+                  )}
+                >
+                  {beginnerMode ? "ON" : "OFF"}
+                </button>
+              </label>
               <Link href="/" className="numeric rounded border border-terminal-border px-2 py-1">Market Dashboard</Link>
               <span className={cls("numeric rounded border px-2 py-1", status === "running" ? "border-terminal-cyan text-terminal-cyan" : "border-terminal-border text-slate-400")}>Run: {status ?? "idle"}</span>
             </div>
@@ -281,37 +383,136 @@ export function BacktestWorkbench() {
         <section className="grid grid-cols-1 gap-4 xl:grid-cols-[560px_1fr]">
           <aside className="space-y-4">
             <div className="grid-panel p-4 space-y-2">
-              <input value={name} onChange={(e) => setName(e.target.value)} className="numeric w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-sm" />
-              <input value={symbolsInput} onChange={(e) => setSymbolsInput(e.target.value.toUpperCase())} className="numeric w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-sm" />
+              <div className="text-xs uppercase tracking-[0.14em] text-terminal-cyan">Strategy Basics</div>
+              <label className="block text-[11px] text-slate-400">
+                Strategy Name
+                <InfoHint text="Just a label so you can recognize this setup in run history." />
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="numeric mt-1 w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-sm"
+                />
+              </label>
+              <label className="block text-[11px] text-slate-400">
+                Symbols (comma-separated)
+                <InfoHint text="Stocks this strategy is allowed to trade. Example: RELIANCE,TCS,INFY" />
+                <input
+                  value={symbolsInput}
+                  onChange={(e) => setSymbolsInput(e.target.value.toUpperCase())}
+                  className="numeric mt-1 w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-sm"
+                />
+              </label>
               <div className="grid grid-cols-2 gap-2">
-                <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-                <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
+                <label className="block text-[11px] text-slate-400">
+                  Start Date
+                  <InfoHint text="Backtest start date. Older dates give more history." />
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="numeric mt-1 w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"
+                  />
+                </label>
+                <label className="block text-[11px] text-slate-400">
+                  End Date
+                  <InfoHint text="Backtest end date. Usually keep this near current date." />
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="numeric mt-1 w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"
+                  />
+                </label>
               </div>
-              <input value={benchmark} onChange={(e) => setBenchmark(e.target.value.toUpperCase())} className="numeric w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-sm" />
+              <label className="block text-[11px] text-slate-400">
+                Benchmark Index (optional)
+                <InfoHint text="Index used to compare performance, e.g. SENSEX or BSE500." />
+                <input
+                  value={benchmark}
+                  onChange={(e) => setBenchmark(e.target.value.toUpperCase())}
+                  className="numeric mt-1 w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-sm"
+                  placeholder="SENSEX"
+                />
+              </label>
             </div>
-            <StepEditor title="Universe Filters" category="filter" steps={filters} onChange={setFilters} tools={byCategory.filter} />
-            <StepEditor title="Entry Signals" category="signal" steps={signals} onChange={setSignals} tools={byCategory.signal} />
-            <StepEditor title="Exit Conditions" category="exit" steps={exits} onChange={setExits} tools={byCategory.exit} />
+            <StepEditor
+              title="Universe Filters"
+              category="filter"
+              steps={filters}
+              onChange={setFilters}
+              tools={byCategory.filter}
+              beginnerMode={beginnerMode}
+              hint="Filters reduce your stock list before buy rules are checked."
+            />
+            <StepEditor
+              title="Entry Signals"
+              category="signal"
+              steps={signals}
+              onChange={setSignals}
+              tools={byCategory.signal}
+              beginnerMode={beginnerMode}
+              hint="These are your buy rules."
+            />
+            <StepEditor
+              title="Exit Conditions"
+              category="exit"
+              steps={exits}
+              onChange={setExits}
+              tools={byCategory.exit}
+              beginnerMode={beginnerMode}
+              hint="These are your sell rules."
+            />
             <div className="grid-panel p-4 space-y-2">
               <div className="text-xs uppercase tracking-[0.12em] text-terminal-cyan">Sizing</div>
               <select value={sizing.tool} onChange={(e) => setSizing(makeStep(e.target.value, defaultsForTool(byCategory.sizing.find((t) => t.name === e.target.value))))} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs">
                 {byCategory.sizing.map((t) => <option key={`s-${t.name}`} value={t.name}>{t.name}</option>)}
               </select>
               <textarea rows={4} value={sizing.paramsText} onChange={(e) => setSizing({ ...sizing, paramsText: e.target.value })} className="numeric w-full rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-              <div className="grid grid-cols-2 gap-2">
-                <select value={entryCombine} onChange={(e) => setEntryCombine(e.target.value as "AND" | "OR")} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"><option value="AND">AND</option><option value="OR">OR</option></select>
-                <select value={exitCombine} onChange={(e) => setExitCombine(e.target.value as "FIRST_HIT" | "ALL_REQUIRED")} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"><option value="FIRST_HIT">FIRST_HIT</option><option value="ALL_REQUIRED">ALL_REQUIRED</option></select>
-                <input value={rankBy} onChange={(e) => setRankBy(e.target.value)} placeholder="rank_by tool" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-                <select value={rebalance} onChange={(e) => setRebalance(e.target.value as "weekly" | "monthly")} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"><option value="weekly">weekly</option><option value="monthly">monthly</option></select>
-                <input type="number" value={maxSignalsPerPeriod} onChange={(e) => setMaxSignalsPerPeriod(Number(e.target.value))} placeholder="max entries" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-                <input type="number" value={maxPositions} onChange={(e) => setMaxPositions(Number(e.target.value))} placeholder="max positions" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-                <input type="number" value={initialCapital} onChange={(e) => setInitialCapital(Number(e.target.value))} placeholder="capital" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-                <input type="number" value={slippageBps} onChange={(e) => setSlippageBps(Number(e.target.value))} placeholder="slippage bps" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-                <input type="number" step={0.01} value={costPct} onChange={(e) => setCostPct(Number(e.target.value))} placeholder="cost %" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
-              </div>
+              {beginnerMode ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-[11px] text-slate-400">
+                    Initial Capital
+                    <InfoHint text="Starting amount for the simulation." />
+                    <input
+                      type="number"
+                      value={initialCapital}
+                      onChange={(e) => setInitialCapital(Number(e.target.value))}
+                      className="numeric mt-1 rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"
+                    />
+                  </label>
+                  <label className="text-[11px] text-slate-400">
+                    Max Positions
+                    <InfoHint text="Maximum simultaneous holdings. Lower = more conservative." />
+                    <input
+                      type="number"
+                      value={maxPositions}
+                      onChange={(e) => setMaxPositions(Number(e.target.value))}
+                      className="numeric mt-1 rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"
+                    />
+                  </label>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <select value={entryCombine} onChange={(e) => setEntryCombine(e.target.value as "AND" | "OR")} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"><option value="AND">AND</option><option value="OR">OR</option></select>
+                  <select value={exitCombine} onChange={(e) => setExitCombine(e.target.value as "FIRST_HIT" | "ALL_REQUIRED")} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"><option value="FIRST_HIT">FIRST_HIT</option><option value="ALL_REQUIRED">ALL_REQUIRED</option></select>
+                  <input value={rankBy} onChange={(e) => setRankBy(e.target.value)} placeholder="rank_by tool" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
+                  <select value={rebalance} onChange={(e) => setRebalance(e.target.value as "weekly" | "monthly")} className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs"><option value="weekly">weekly</option><option value="monthly">monthly</option></select>
+                  <input type="number" value={maxSignalsPerPeriod} onChange={(e) => setMaxSignalsPerPeriod(Number(e.target.value))} placeholder="max entries" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
+                  <input type="number" value={maxPositions} onChange={(e) => setMaxPositions(Number(e.target.value))} placeholder="max positions" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
+                  <input type="number" value={initialCapital} onChange={(e) => setInitialCapital(Number(e.target.value))} placeholder="capital" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
+                  <input type="number" value={slippageBps} onChange={(e) => setSlippageBps(Number(e.target.value))} placeholder="slippage bps" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
+                  <input type="number" step={0.01} value={costPct} onChange={(e) => setCostPct(Number(e.target.value))} placeholder="cost %" className="numeric rounded border border-terminal-border bg-black/60 px-2 py-2 text-xs" />
+                </div>
+              )}
               <div className="flex gap-2">
-                <button onClick={() => void validateNow()} className="numeric rounded border border-terminal-cyan px-3 py-2 text-xs text-terminal-cyan">Validate Spec</button>
-                <button onClick={() => void runNow()} className="numeric rounded border border-terminal-accent px-3 py-2 text-xs text-terminal-accent">Run Backtest</button>
+                <button onClick={() => void validateNow()} className="numeric rounded border border-terminal-cyan px-3 py-2 text-xs text-terminal-cyan">
+                  Validate Spec
+                  <InfoHint text="Checks whether your strategy setup is valid before running." />
+                </button>
+                <button onClick={() => void runNow()} className="numeric rounded border border-terminal-accent px-3 py-2 text-xs text-terminal-accent">
+                  Run Backtest
+                  <InfoHint text="Starts a simulation using historical data and your selected rules." />
+                </button>
               </div>
               {message ? <div className="text-xs text-terminal-green">{message}</div> : null}
               {err ? <div className="text-xs text-terminal-red">{err}</div> : null}
@@ -320,25 +521,52 @@ export function BacktestWorkbench() {
 
           <section className="space-y-4">
             <div className="grid-panel p-4">
-              <div className="text-xs uppercase tracking-[0.14em] text-terminal-cyan">Run History</div>
+              <div className="flex items-center justify-between">
+                <div className="text-xs uppercase tracking-[0.14em] text-terminal-cyan">Run History</div>
+                <button
+                  onClick={() => void loadHistory()}
+                  className="numeric rounded border border-terminal-border px-2 py-1 text-[11px] text-slate-300"
+                >
+                  Refresh
+                </button>
+              </div>
+              {historyError ? <div className="mt-2 text-xs text-terminal-red">{historyError}</div> : null}
               <div className="mt-2 space-y-2">
                 {history.slice(0, 12).map((h) => (
-                  <button key={h.run_id} onClick={() => void loadRun(h.run_id)} className="w-full rounded border border-terminal-border bg-black/20 px-2 py-2 text-left text-xs hover:bg-black/40">
+                  <div key={h.run_id} className="w-full rounded border border-terminal-border bg-black/20 px-2 py-2 text-xs hover:bg-black/40">
                     <div className="numeric truncate">{h.run_id}</div>
                     <div className="mt-1 text-[11px] text-slate-500">Status {h.status} | Return {fmtPercent(h.total_return)} | Sharpe {fmtNumber(h.sharpe, 3)}</div>
-                  </button>
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        onClick={() => void loadRun(h.run_id)}
+                        className="numeric rounded border border-terminal-cyan px-2 py-1 text-[11px] text-terminal-cyan"
+                      >
+                        Load
+                      </button>
+                      <button
+                        onClick={() => void onDeleteRun(h.run_id)}
+                        disabled={deletingRunId === h.run_id}
+                        className="numeric rounded border border-terminal-red px-2 py-1 text-[11px] text-terminal-red disabled:opacity-40"
+                      >
+                        {deletingRunId === h.run_id ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
+                  </div>
                 ))}
+                {!history.length && !historyError ? <div className="text-xs text-slate-500">No runs found yet.</div> : null}
               </div>
             </div>
 
-            <RunComparison
-              history={history}
-              selected={compareSelected}
-              onToggle={(id) => setCompareSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 4 ? prev : [...prev, id]))}
-              onCompare={() => void (async () => setCompareRows((await compareBacktestRuns(compareSelected)).runs ?? []))()}
-              comparing={false}
-              rows={compareRows}
-            />
+            {!beginnerMode ? (
+              <RunComparison
+                history={history}
+                selected={compareSelected}
+                onToggle={(id) => setCompareSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 4 ? prev : [...prev, id]))}
+                onCompare={() => void (async () => setCompareRows((await compareBacktestRuns(compareSelected)).runs ?? []))()}
+                comparing={false}
+                rows={compareRows}
+              />
+            ) : null}
 
             {detail ? (
               <>

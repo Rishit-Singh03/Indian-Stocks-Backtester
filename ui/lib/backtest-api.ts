@@ -193,6 +193,12 @@ export type BacktestCompareResponse = {
   runs: BacktestCompareRun[];
 };
 
+export type BacktestDeleteResponse = {
+  run_id: string;
+  status: "deleted" | string;
+  message: string;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 async function getJson<T>(path: string): Promise<T> {
@@ -255,4 +261,13 @@ export async function fetchBacktestEquity(runId: string, limit = 5000, offset = 
 
 export async function compareBacktestRuns(runIds: string[]): Promise<BacktestCompareResponse> {
   return postJson<BacktestCompareResponse>("/api/v1/backtest/compare", { run_ids: runIds });
+}
+
+export async function deleteBacktestRun(runId: string): Promise<BacktestDeleteResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/backtest/${encodeURIComponent(runId)}`, { method: "DELETE" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`API ${response.status}: ${text}`);
+  }
+  return (await response.json()) as BacktestDeleteResponse;
 }
